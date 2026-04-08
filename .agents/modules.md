@@ -2,37 +2,53 @@
 
 ## Overview
 
-시스템은 아래 4개 모듈로 구성된다. 각 모듈은 명확한 책임을 가지며 독립적으로 구현·교체할 수 있다.
+시스템은 아래 5개 모듈로 구성된다. 각 모듈은 명확한 책임을 가지며 독립적으로 구현·교체할 수 있다.
 
 ---
 
 ## 1. MCP Server
 
-- **책임**: MCP 프로토콜 준수, 클라이언트 요청 수신, 메서드 라우팅, 응답 반환
-- **입력**: MCP 클라이언트 요청 (JSON-RPC)
+- **책임**: MCP 프로토콜 준수, VS 2022 Agent mode 요청 수신, 메서드 라우팅, 응답 반환
+- **입력**: MCP 클라이언트 요청 (JSON-RPC) — 클라이언트는 VS 2022 Agent mode
 - **출력**: MCP 프로토콜 응답 (JSON-RPC)
 - **의존**: Tool Registry, Configuration
-- **비의존**: LLM Connector (직접 호출하지 않음)
+- **비의존**: LLM Connector (직접 호출하지 않음), Resource Cache (직접 접근하지 않음)
 
 ## 2. Tool Registry
 
-- **책임**: 도구 정의 등록, 도구 목록 조회, 도구 실행
+- **책임**: 도구 정의 등록, 도구 목록 조회, 도구 실행, 프롬프트 템플릿 로드
 - **입력**: ToolListRequest, ToolCallRequest (`contracts.md` 참조)
 - **출력**: ToolListResponse, ToolCallResponse (`contracts.md` 참조)
-- **의존**: LLM Connector (도구 실행 시 필요한 경우에만), Configuration
+- **의존**: LLM Connector (도구 실행 시 필요한 경우에만), Resource Cache (도구 실행 시 자료 조회가 필요한 경우에만), Configuration
 - **비의존**: MCP Server
+- **프롬프트 관리**: 각 도구는 `Config.tools.promptsDirectory`에서 `{toolName}.prompt.md` 파일을 로드하여 변수 치환 후 LLMRequest.prompt로 전달한다. 코드 수정 없이 프롬프트 튜닝이 가능하다.
 
 ## 3. LLM Connector
 
-- **책임**: LLM 엔드포인트와의 통신 추상화, 요청/응답 변환
+- **책임**: 로컬 LLM 엔드포인트와의 통신 추상화, 요청/응답 변환, 모델 선택
 - **입력**: LLMRequest (`contracts.md` 참조)
 - **출력**: LLMResponse (`contracts.md` 참조)
 - **의존**: Configuration
-- **외부 의존**: LLM 엔드포인트 (로컬 또는 원격)
+- **외부 의존**: 로컬 LLM 엔드포인트 (권장: Ollama)
+- **제약**: 오프라인 환경 전용. 원격 LLM 엔드포인트를 사용하지 않는다.
+- **다중 모델**: 기본 모델(추론용)과 보조 모델(요약용)을 Config 기반으로 선택한다.
 
-## 4. Configuration
+## 4. Resource Cache
 
-- **책임**: 서버, 모델, 도구 설정의 중앙 관리
+- **책임**: 현장 필수 자료(문서, 표준, API 참조, 코드 스니펫 등)의 로컬 저장 및 조회, **프로젝트 코드 인덱스** 검색
+- **입력**: CacheLookupRequest, CodeSearchRequest (`contracts.md` 참조)
+- **출력**: CacheLookupResponse, CodeSearchResponse (`contracts.md` 참조)
+- **의존**: Configuration
+- **제약**: 모든 자료는 사전 준비(pre-populated)되어야 한다. 런타임에 외부에서 자료를 다운로드하지 않는다.
+- **코드 인덱스**: 하이브리드 방식으로 동작한다.
+  1. 정규식 기반 심볼 추출: 소스 파일에서 클래스/함수/메서드 선언 패턴을 감지하여 심볼 목록을 구축한다.
+  2. 전문 텍스트 검색: 키워드 기반 역인덱스로 전체 텍스트 검색을 지원한다.
+  3. 색인 범위는 Config.codeIndex.filePatterns로 제어한다.
+  4. 향후 필요 시 AST 파싱(Roslyn 등)으로 업그레이드 가능한다.
+
+## 5. Configuration
+
+- **책임**: 서버, 모델, 도구, 캐시, 코드 인덱스 설정의 중앙 관리
 - **입력**: 설정 파일 또는 환경 변수
 - **출력**: Config 객체 (`contracts.md` 참조)
 - **의존**: 없음

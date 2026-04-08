@@ -10,7 +10,7 @@
 ## Main Request Pipeline
 
 ```
-1. [Client (외부)]
+1. [VS 2022 Agent Mode (외부)]
    │  MCP 요청 전송 (JSON-RPC)
    ▼
 2. [MCP Server] 요청 수신 및 파싱
@@ -31,7 +31,7 @@
 5a. [Tool Registry] 등록된 도구 목록 반환 (ToolListResponse)
     │
     ▼
-6a. [MCP Server] Response 구성 → Client 응답
+6a. [MCP Server] Response 구성 → VS 2022 Agent Mode 응답
 ```
 
 ### 4b. Tool Call Flow
@@ -45,11 +45,12 @@
     ▼
 6b. [Tool Registry] 도구 실행
     │  LLM 호출이 필요한 경우 → (LLM Sub-Pipeline)
+    │  자료 조회가 필요한 경우 → (Cache Sub-Pipeline)
     ▼
 7b. [Tool Registry] ToolCallResponse 반환
     │
     ▼
-8b. [MCP Server] Response 구성 → Client 응답
+8b. [MCP Server] Response 구성 → VS 2022 Agent Mode 응답
 ```
 
 ### LLM Sub-Pipeline
@@ -58,15 +59,72 @@ Tool Registry가 도구 실행 중 LLM 호출이 필요할 때 사용한다.
 
 ```
 1. [Tool Registry] → [LLM Connector] LLMRequest 전달
-   │
+   │  model 필드로 기본/보조 모델 선택
    ▼
 2. [LLM Connector] 프롬프트 포맷팅 및 옵션 적용
    │
    ▼
-3. [LLM Connector] → [LLM Endpoint (외부)] 호출
+3. [LLM Connector] → [로컬 LLM Endpoint (외부, Ollama)] 호출
    │
    ▼
 4. [LLM Connector] 응답 파싱 → LLMResponse 반환
+```
+
+### Cache Sub-Pipeline
+
+Tool Registry가 도구 실행 중 현장 자료 조회가 필요할 때 사용한다.
+
+```
+1. [Tool Registry] → [Resource Cache] CacheLookupRequest 전달
+   │
+   ▼
+2. [Resource Cache] 로컬 자료 검색
+   │
+   ▼
+3. [Resource Cache] CacheLookupResponse 반환
+```
+
+### Code Search Sub-Pipeline
+
+Tool Registry가 프로젝트 코드 검색이 필요할 때 사용한다.
+
+```
+1. [Tool Registry] → [Resource Cache] CodeSearchRequest 전달
+   │
+   ▼
+2. [Resource Cache] 코드 인덱스에서 심볼/키워드 검색
+   │
+   ▼
+3. [Resource Cache] CodeSearchResponse 반환
+```
+
+---
+
+## Tool-Specific Flows
+
+각 도구가 Sub-Pipeline을 어떻게 조합하는지 명시한다.  
+모든 LLM 호출 도구는 실행 전 `Config.tools.promptsDirectory`에서 `{toolName}.prompt.md`를 로드하고 변수를 치환한 후 LLMRequest.prompt로 전달한다.
+
+```
+summarize_current_code:
+  → 템플릿 로드 (summarize_current_code.prompt.md)
+  → {{code}}, {{language}} 변수 치환
+  → LLM Sub-Pipeline (summaryModel 우선)
+
+search_project_code:
+  → Code Search Sub-Pipeline (프롬프트 불필요, 인덱스 직접 검색)
+
+suggest_fix_from_error_log:
+  → 템플릿 로드 (suggest_fix_from_error_log.prompt.md)
+  → (선택) Cache Sub-Pipeline (관련 문서 조회)
+  → {{errorLog}}, {{codeContext}}, {{references}} 변수 치환
+  → LLM Sub-Pipeline (defaultModel)
+
+ask_local_docs:
+  → Cache Sub-Pipeline (자료 검색)
+  → 템플릿 로드 (ask_local_docs.prompt.md)
+  → {{question}}, {{context}} 변수 치환
+  → LLM Sub-Pipeline (defaultModel, 검색 결과 기반 답변 생성)
 ```
 
 ---
@@ -76,7 +134,7 @@ Tool Registry가 도구 실행 중 LLM 호출이 필요할 때 사용한다.
 ```
 임의 단계에서 에러 발생 시:
   → 에러를 MCP Error Response (contracts.md Response.error)로 래핑
-  → Client에 반환
+  → VS 2022 Agent Mode에 반환
 ```
 
 ---
@@ -85,7 +143,12 @@ Tool Registry가 도구 실행 중 LLM 호출이 필요할 때 사용한다.
 
 ```
 1. [Configuration] 설정 로드 (파일 / 환경 변수)
-2. [Tool Registry] 초기화 (도구 스캔 및 등록)
-3. [LLM Connector] 초기화 (엔드포인트 연결 확인)
-4. [MCP Server] 시작 (Config.server.transport에 따라 리스닝)
+2. [Resource Cache] 초기화
+   a. 캐시 디렉터리 로드
+   b. 코드 인덱스 구축 (하이브리드: 심볼 추출 + 텍스트 역인덱스)
+3. [Tool Registry] 초기화
+   a. 도구 4종 등록
+   b. 프롬프트 템플릿 로드 (Config.tools.promptsDirectory)
+4. [LLM Connector] 초기화 (로컬 LLM 엔드포인트 연결 확인, 모델 가용성 확인)
+5. [MCP Server] 시작 (Config.server.transport에 따라 리스닝)
 ```
