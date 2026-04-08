@@ -187,7 +187,8 @@ Output {
 }
 ```
 
-- **사용 모듈**: LLM Connector (summaryModel 우선, 없으면 defaultModel)
+- **사용 모듈**: LLM Connector (모델 선택은 OllamaConnector에 위임 — summaryModel → defaultModel → 하드코딩 fallback)
+- **프롬프트**: `prompts/summarize_current_code.prompt.md` — 구조화된 요약 (목적, 구성요소, 알고리즘, 주의사항)
 
 ### 7b. search_project_code
 

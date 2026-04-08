@@ -13,6 +13,7 @@
 - **출력**: MCP 프로토콜 응답 (JSON-RPC)
 - **의존**: Tool Registry, Configuration
 - **비의존**: LLM Connector (직접 호출하지 않음), Resource Cache (직접 접근하지 않음)
+- **구현**: `McpServer/McpEndpoints.cs` — SSE 전송 방식 (`GET /sse`, `POST /message`), JSON 직렬화는 `JsonSerializerOptions`(camelCase) 사용
 
 ## 2. Tool Registry
 
@@ -22,6 +23,7 @@
 - **의존**: LLM Connector (도구 실행 시 필요한 경우에만), Resource Cache (도구 실행 시 자료 조회가 필요한 경우에만), Configuration
 - **비의존**: MCP Server
 - **프롬프트 관리**: 각 도구는 `Config.tools.promptsDirectory`에서 `{toolName}.prompt.md` 파일을 로드하여 변수 치환 후 LLMRequest.prompt로 전달한다. 코드 수정 없이 프롬프트 튜닝이 가능하다.
+- **구현**: `ToolRegistry/` — ToolRegistryService, SummarizeCurrentCodeTool, PromptTemplateLoader
 
 ## 3. LLM Connector
 
@@ -31,7 +33,8 @@
 - **의존**: Configuration
 - **외부 의존**: 로컬 LLM 엔드포인트 (권장: Ollama)
 - **제약**: 오프라인 환경 전용. 원격 LLM 엔드포인트를 사용하지 않는다.
-- **다중 모델**: 기본 모델(추론용)과 보조 모델(요약용)을 Config 기반으로 선택한다.
+- **다중 모델**: 기본 모델(추론용)과 보조 모델(요약용)을 Config 기반으로 선택한다. 모델 선택 시 `string.IsNullOrEmpty` 검증으로 빈 문자열도 fallback 처리한다.
+- **구현**: `LlmConnector/` — OllamaConnector (`/api/chat` 엔드포인트), LlmModels
 
 ## 4. Resource Cache
 
@@ -45,6 +48,7 @@
   2. 전문 텍스트 검색: 키워드 기반 역인덱스로 전체 텍스트 검색을 지원한다.
   3. 색인 범위는 Config.codeIndex.filePatterns로 제어한다.
   4. 향후 필요 시 AST 파싱(Roslyn 등)으로 업그레이드 가능한다.
+- **구현**: 미구현 — 다음 단계에서 구현 예정
 
 ## 5. Configuration
 
@@ -52,6 +56,7 @@
 - **입력**: 설정 파일 또는 환경 변수
 - **출력**: Config 객체 (`contracts.md` 참조)
 - **의존**: 없음
+- **구현**: `Configuration/ServerConfig.cs` + `appsettings.json`
 
 ---
 
