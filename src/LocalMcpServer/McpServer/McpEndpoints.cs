@@ -147,7 +147,11 @@ public static class McpEndpoints
                 }
 
                 logger.LogInformation("REST 도구 호출: {ToolName}", toolName);
-                var result = await tool.ExecuteAsync(arguments, ct);
+
+                // 로컬 LLM 추론은 수 분이 걸릴 수 있으므로, 클라이언트 취소(ct)와 별도로
+                // 5분 타임아웃 CancellationToken을 사용한다.
+                using var llmCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+                var result = await tool.ExecuteAsync(arguments, llmCts.Token);
 
                 return Results.Json(new
                 {

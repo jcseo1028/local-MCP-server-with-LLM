@@ -62,12 +62,15 @@
 ## 6. VS Extension (VSIX)
 
 - **책임**: VS 2022 내 Tool Window UI 제공, 현재 편집 파일/선택 영역 코드 획득, MCP Server REST API 호출, 결과 표시
-- **입력**: 사용자 버튼 클릭 (현재 파일 요약, 선택 영역 요약)
-- **출력**: Tool Window에 요약 결과 텍스트 표시
-- **의존**: MCP Server (REST API — contracts.md §8)
+- **입력**: 사용자 버튼 클릭 (현재 파일, 선택 영역) + 도구 선택 (서버에서 동적 로드)
+- **출력**: Tool Window에 Markdown 렌더링된 결과 표시 (FlowDocument)
+- **의존**: MCP Server (REST API — contracts.md §8: GET /api/tools/list + POST /api/tools/call)
 - **비의존**: Tool Registry, LLM Connector, Resource Cache, Configuration (모두 서버 측)
 - **제약**: VS 2022 17.14+ 전용, .NET Framework 4.8, 오프라인 환경에서도 동작 (서버가 로컬이므로)
-- **구현**: `src/LocalMcpVsExtension/` — VSIX 프로젝트 (Community.VisualStudio.Toolkit.17)
+- **VS 테마**: VsBrushes + VSColorTheme 기반 Dark/Light/Blue 자동 대응
+- **Markdown 렌더링**: Markdig AST → WPF FlowDocument 변환 (헤딩, 리스트, 코드블록, 볼드/이탤릭, 인용)
+- **동적 도구 로딩**: 시작 시 GET /api/tools/list로 서버 도구 목록 조회 → ComboBox에 표시. 서버에 도구 추가 시 VSIX 재설치 불필요.
+- **구현**: `src/LocalMcpVsExtension/` — VSIX 프로젝트 (Community.VisualStudio.Toolkit.17, Markdig)
 - **빌드 주의**: SDK-style csproj에서 `<Import Project="Sdk.props" />` / `<Import Project="Sdk.targets" />` 를 명시적으로 분리하고 VsSDK.targets를 Sdk.targets 뒤에 import해야 pkgdef 생성과 VSIX 패키징이 동작한다. VS 2022 MSBuild로 빌드한다.
 
 ---

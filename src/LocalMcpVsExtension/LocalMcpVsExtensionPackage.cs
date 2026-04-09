@@ -9,10 +9,11 @@ namespace LocalMcpVsExtension
 {
     [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
     [InstalledProductRegistration("Local MCP 코드 요약",
-        "오프라인 환경에서 로컬 MCP 서버의 코드 요약 도구를 호출합니다.", "1.0.0")]
+        "오프라인 환경에서 로컬 MCP 서버의 코드 요약 도구를 호출합니다.", "1.1.0")]
     [ProvideMenuResource("Menus.ctmenu", 1)]
     [Guid(PackageGuids.guidLocalMcpVsExtensionPackageString)]
     [ProvideToolWindow(typeof(ToolWindows.SummaryToolWindow.Pane))]
+    [ProvideBindingPath]  // 확장 디렉터리에서 Markdig.dll 등 NuGet DLL 찾기
     public sealed class LocalMcpVsExtensionPackage : ToolkitPackage
     {
         protected override async Task InitializeAsync(

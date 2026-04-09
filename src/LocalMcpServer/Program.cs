@@ -2,15 +2,26 @@ using LocalMcpServer.Configuration;
 using LocalMcpServer.LlmConnector;
 using LocalMcpServer.McpServer;
 using LocalMcpServer.ToolRegistry;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Kestrel 요청 타임아웃: 로컬 LLM 추론은 수 분이 걸릴 수 있음
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(10);
+    options.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(10);
+});
 
 // --- Configuration 모듈 ---
 builder.Services.Configure<ServerConfig>(builder.Configuration);
 var config = builder.Configuration.Get<ServerConfig>() ?? new ServerConfig();
 
 // --- LLM Connector 모듈 ---
-builder.Services.AddHttpClient<OllamaConnector>();
+builder.Services.AddHttpClient<OllamaConnector>(client =>
+{
+    client.Timeout = TimeSpan.FromMinutes(5); // 로컬 LLM 추론은 100초 이상 걸릴 수 있음
+});
 
 // --- Tool Registry 모듈 ---
 var promptsDir = Path.GetFullPath(config.Tools.PromptsDirectory);

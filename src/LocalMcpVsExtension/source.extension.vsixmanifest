@@ -4,12 +4,12 @@
                  xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
     <Identity Id="LocalMcpVsExtension.d8f7a321-5b2e-4c9f-b6e8-1a2b3c4d5e6f"
-              Version="1.0.0"
+              Version="1.1.0"
               Language="ko-KR"
               Publisher="Local MCP" />
     <DisplayName>Local MCP 코드 요약</DisplayName>
-    <Description xml:space="preserve">오프라인 환경에서 로컬 MCP 서버의 코드 요약 도구를 VS 2022 Tool Window에서 직접 호출합니다.</Description>
-    <Tags>MCP, 코드요약, 오프라인, LLM</Tags>
+    <Description xml:space="preserve">오프라인 환경에서 로컬 MCP 서버의 코드 요약 도구를 VS 2022 Tool Window에서 직접 호출합니다. VS 테마 지원, Markdown 렌더링, 동적 도구 로딩을 제공합니다.</Description>
+    <Tags>MCP, 코드요약, 오프라인, LLM, Markdown</Tags>
   </Metadata>
   <Installation>
     <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.14, 18.0)">

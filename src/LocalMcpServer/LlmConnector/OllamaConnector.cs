@@ -41,7 +41,8 @@ public sealed class OllamaConnector
             Options = new OllamaOptions
             {
                 Temperature = request.Options.Temperature,
-                NumPredict = request.Options.MaxTokens
+                NumPredict = request.Options.MaxTokens,
+                NumCtx = request.Options.NumCtx > 0 ? request.Options.NumCtx : 2048
             }
         };
 
@@ -129,6 +130,9 @@ internal sealed class OllamaOptions
 
     [JsonPropertyName("num_predict")]
     public int NumPredict { get; set; }
+
+    [JsonPropertyName("num_ctx")]
+    public int NumCtx { get; set; }
 }
 
 internal sealed class OllamaChatResponse

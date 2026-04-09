@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -8,7 +9,7 @@ namespace LocalMcpVsExtension.Services
 {
     /// <summary>
     /// MCP Server Direct REST API 클라이언트.
-    /// contracts.md §8 (POST /api/tools/call) 준수.
+    /// contracts.md §8 (GET /api/tools/list, POST /api/tools/call) 준수.
     /// </summary>
     internal sealed class McpRestClient
     {
@@ -24,15 +25,29 @@ namespace LocalMcpVsExtension.Services
         };
 
         /// <summary>
-        /// MCP 도구를 REST API로 호출한다.
+        /// 서버에 등록된 도구 목록을 조회한다. (GET /api/tools/list)
+        /// </summary>
+        public async Task<ToolInfo[]> GetToolsAsync(string serverUrl)
+        {
+            var response = await s_http.GetAsync(
+                $"{serverUrl}/api/tools/list").ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+
+            var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var result = JsonSerializer.Deserialize<ToolListResponse>(json, s_jsonOptions);
+            return result?.Tools ?? Array.Empty<ToolInfo>();
+        }
+
+        /// <summary>
+        /// MCP 도구를 REST API로 호출한다. (POST /api/tools/call)
         /// </summary>
         public async Task<string> CallToolAsync(
-            string serverUrl, string toolName, string code, string language)
+            string serverUrl, string toolName, IDictionary<string, string> arguments)
         {
             var request = new ToolCallRequest
             {
                 Name = toolName,
-                Arguments = new ToolCallArguments { Code = code, Language = language }
+                Arguments = arguments
             };
 
             var json = JsonSerializer.Serialize(request, s_jsonOptions);
@@ -59,18 +74,25 @@ namespace LocalMcpVsExtension.Services
         }
     }
 
-    // ── DTO ─────────────────────────────────────────────────
+    // ── DTO: 도구 목록 ──────────────────────────────────────
+
+    internal sealed class ToolListResponse
+    {
+        public ToolInfo[]? Tools { get; set; }
+    }
+
+    internal sealed class ToolInfo
+    {
+        public string Name { get; set; } = "";
+        public string Description { get; set; } = "";
+    }
+
+    // ── DTO: 도구 호출 ──────────────────────────────────────
 
     internal sealed class ToolCallRequest
     {
         public string Name { get; set; } = "";
-        public ToolCallArguments Arguments { get; set; } = new ToolCallArguments();
-    }
-
-    internal sealed class ToolCallArguments
-    {
-        public string Code { get; set; } = "";
-        public string Language { get; set; } = "";
+        public IDictionary<string, string> Arguments { get; set; } = new Dictionary<string, string>();
     }
 
     internal sealed class ToolCallResponse

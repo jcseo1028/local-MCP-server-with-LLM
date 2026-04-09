@@ -9,7 +9,7 @@
 - **LLM 런타임**: Ollama (`/api/chat` 엔드포인트)
 - **기본 모델**: qwen2.5-coder:7b
 - **접속 방식**: SSE (VS 2022 Agent mode) 또는 Direct REST API (오프라인 CLI)
-- **상태**: `summarize_current_code` 도구 구현 · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) 완료
+- **상태**: `summarize_current_code` 도구 구현 · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v1.1 (테마·마크다운·동적도구)
 - **비목표**: GitHub Copilot 대체
 
 ## 구성
@@ -182,6 +182,11 @@ src/LocalMcpVsExtension/
 
 인터넷이 없는 환경에서 VS 2022 안에서 직접 코드 요약을 사용할 수 있는 Tool Window 확장이다.
 
+**v1.1 주요 기능:**
+- VS Dark/Light/Blue 테마 자동 대응 (VsBrushes + VSColorTheme)
+- LLM 응답을 Markdown으로 렌더링 (헤딩, 리스트, 코드블록, 볼드 등)
+- 서버 도구 목록을 동적으로 로드하여 ComboBox에 표시 — 서버에 도구 추가 시 VSIX 재설치 불필요
+
 ### 빌드
 
 Visual Studio 2022 MSBuild를 사용한다:
@@ -203,8 +208,10 @@ Visual Studio 2022 MSBuild를 사용한다:
 
 1. **MCP 서버 실행**: `cd src/LocalMcpServer && dotnet run`
 2. **Tool Window 열기**: VS 메뉴 → **보기 → 다른 창 → Local MCP 코드 요약**
-3. **현재 파일 요약**: 편집기에서 파일을 열고 "현재 파일 요약" 버튼 클릭
-4. **선택 영역 요약**: 코드를 선택한 상태에서 "선택 영역 요약" 버튼 클릭
+3. 도구 창이 열리면 서버에서 **도구 목록이 자동으로 로드**된다 (↻ 버튼으로 새로고침 가능)
+4. **현재 파일**: 편집기에서 파일을 열고 "현재 파일" 버튼 클릭
+5. **선택 영역**: 코드를 선택한 상태에서 "선택 영역" 버튼 클릭
+6. 결과가 **Markdown으로 렌더링**되어 Tool Window에 표시된다
 
 서버 주소는 Tool Window 상단의 URL 필드에서 변경 가능하다 (기본: `http://localhost:5100`).
 
