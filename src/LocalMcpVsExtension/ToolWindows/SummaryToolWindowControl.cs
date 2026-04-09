@@ -21,11 +21,22 @@ namespace LocalMcpVsExtension.ToolWindows
     {
         private readonly McpRestClient _client = new McpRestClient();
 
+        // 수정 도구 — 결과를 에디터에 반영하기 위한 상태
+        private string? _lastResult;
+        private bool _lastSelectionOnly;
+
+        // 수정 도구 목록 (결과를 에디터에 적용 가능한 도구)
+        private static readonly HashSet<string> EditTools = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "add_comments", "refactor_current_code", "fix_code_issues"
+        };
+
         // ── UI 요소 ────────────────────────────────────────────
         private readonly ComboBox _cmbTool;
         private readonly Button _btnRefresh;
         private readonly Button _btnCurrentFile;
         private readonly Button _btnSelection;
+        private readonly Button _btnApply;
         private readonly TextBox _txtServerUrl;
         private readonly FlowDocumentScrollViewer _docViewer;
         private readonly TextBlock _txtStatus;
@@ -71,9 +82,15 @@ namespace LocalMcpVsExtension.ToolWindows
             toolbar.Children.Add(_btnCurrentFile);
 
             _btnSelection = CreateButton("선택 영역");
-            _btnSelection.Margin = new Thickness(0, 0, 12, 4);
+            _btnSelection.Margin = new Thickness(0, 0, 4, 4);
             _btnSelection.Click += BtnSelection_Click;
             toolbar.Children.Add(_btnSelection);
+
+            _btnApply = CreateButton("📋 적용", "결과를 에디터에 반영합니다");
+            _btnApply.Margin = new Thickness(0, 0, 12, 4);
+            _btnApply.IsEnabled = false;
+            _btnApply.Click += BtnApply_Click;
+            toolbar.Children.Add(_btnApply);
 
             // 서버 주소
             toolbar.Children.Add(CreateLabel("서버:"));
@@ -214,6 +231,14 @@ namespace LocalMcpVsExtension.ToolWindows
                 await ExecuteToolAsync(selectionOnly: true);
             });
         }
+
+        private void BtnApply_Click(object sender, RoutedEventArgs e)
+        {
+            _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await ApplyResultToEditorAsync();
+            });
+        }
 #pragma warning restore VSSDK007
 
         // ── 도구 목록 로드 ─────────────────────────────────────
@@ -325,7 +350,7 @@ namespace LocalMcpVsExtension.ToolWindows
                 var serverUrl = _txtServerUrl.Text.TrimEnd('/');
                 _txtStatus.Text = $"MCP 서버 요청 중 ({toolName})...";
                 ShowPlainText(
-                    "요약을 생성하고 있습니다.\n" +
+                    "처리하고 있습니다.\n" +
                     "모델 크기에 따라 10~60초 소요될 수 있습니다...");
 
                 var arguments = new Dictionary<string, string>
@@ -340,6 +365,19 @@ namespace LocalMcpVsExtension.ToolWindows
 
                 // Markdown 렌더링
                 ShowMarkdown(result);
+
+                // 수정 도구면 결과를 저장하고 적용 버튼 활성화
+                if (EditTools.Contains(toolName))
+                {
+                    _lastResult = result;
+                    _lastSelectionOnly = selectionOnly;
+                    _btnApply.IsEnabled = true;
+                }
+                else
+                {
+                    _lastResult = null;
+                    _btnApply.IsEnabled = false;
+                }
 
                 _txtStatus.Text = string.Format(
                     "완료 ({0:F1}초) — {1:HH:mm:ss}", sw.Elapsed.TotalSeconds, DateTime.Now);
@@ -369,6 +407,261 @@ namespace LocalMcpVsExtension.ToolWindows
             {
                 SetBusy(false);
             }
+        }
+
+        // ── 에디터에 결과 반영 ─────────────────────────────────
+
+        /// <summary>
+        /// 수정 도구(add_comments, refactor, fix) 결과를 활성 에디터에 적용한다.
+        /// LLM 응답에서 코드 블록을 추출하여 에디터 텍스트를 교체한다.
+        /// </summary>
+        private async Task ApplyResultToEditorAsync()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_lastResult))
+                {
+                    _txtStatus.Text = "적용할 결과가 없습니다.";
+                    return;
+                }
+
+                var docView = await VS.Documents.GetActiveDocumentViewAsync();
+                if (docView?.TextBuffer == null)
+                {
+                    _txtStatus.Text = "열린 문서가 없습니다.";
+                    return;
+                }
+
+                // LLM 응답에서 코드 추출 (코드 블록이 있으면 추출, 없으면 전체 텍스트)
+                var code = ExtractCodeFromResult(_lastResult ?? "");
+                if (string.IsNullOrWhiteSpace(code))
+                {
+                    _txtStatus.Text = "적용할 코드를 찾을 수 없습니다.";
+                    return;
+                }
+
+                var textBuffer = docView.TextBuffer;
+
+                var snapshot = textBuffer.CurrentSnapshot;
+
+                // 원본 문서의 줄바꿈 형식을 감지하여 LLM 응답의 줄바꿈을 맞춘다
+                code = NormalizeNewlines(code, snapshot);
+
+                // 원본 문서의 들여쓰기 스타일(탭/스페이스)에 맞춰 변환한다
+                code = NormalizeIndentation(code, snapshot);
+
+                if (_lastSelectionOnly)
+                {
+                    // 선택 영역만 교체
+                    var selection = docView.TextView?.Selection;
+                    if (selection != null && selection.SelectedSpans.Count > 0)
+                    {
+                        var span = selection.SelectedSpans[0];
+                        using (var edit = textBuffer.CreateEdit())
+                        {
+                            edit.Replace(span.Span, code);
+                            edit.Apply();
+                        }
+                    }
+                    else
+                    {
+                        _txtStatus.Text = "선택 영역이 없습니다. 동일한 영역을 다시 선택 후 적용하세요.";
+                        return;
+                    }
+                }
+                else
+                {
+                    // 전체 파일 교체
+                    using (var edit = textBuffer.CreateEdit())
+                    {
+                        edit.Replace(0, snapshot.Length, code);
+                        edit.Apply();
+                    }
+                }
+
+                _btnApply.IsEnabled = false;
+                _lastResult = null;
+                _txtStatus.Text = "에디터에 적용 완료";
+            }
+            catch (Exception ex)
+            {
+                _txtStatus.Text = "적용 실패: " + ex.Message;
+            }
+        }
+
+        /// <summary>
+        /// LLM 응답에서 코드 부분을 추출한다.
+        /// 마지막 코드 블록(``` 감싸인)이 있으면 해당 내용, 없으면 전체 텍스트를 반환한다.
+        /// </summary>
+        private static string ExtractCodeFromResult(string result)
+        {
+            // 마지막 코드 블록을 찾는다 (LLM이 "변경 요약" 뒤에 코드를 넣는 경우)
+            var lastFenceStart = -1;
+            var lastFenceEnd = -1;
+            var idx = 0;
+
+            while (idx < result.Length)
+            {
+                var fenceStart = result.IndexOf("```", idx, StringComparison.Ordinal);
+                if (fenceStart < 0) break;
+
+                // 여는 ``` 다음 줄
+                var contentStart = result.IndexOf('\n', fenceStart);
+                if (contentStart < 0) break;
+                contentStart++;
+
+                // 닫는 ```
+                var fenceEnd = result.IndexOf("```", contentStart, StringComparison.Ordinal);
+                if (fenceEnd < 0) break;
+
+                lastFenceStart = contentStart;
+                lastFenceEnd = fenceEnd;
+                idx = fenceEnd + 3;
+            }
+
+            if (lastFenceStart >= 0 && lastFenceEnd > lastFenceStart)
+            {
+                return result.Substring(lastFenceStart, lastFenceEnd - lastFenceStart).TrimEnd();
+            }
+
+            // 코드 블록이 없으면 전체 텍스트 반환
+            return result.Trim();
+        }
+
+        /// <summary>
+        /// LLM 응답의 줄바꿈을 원본 문서의 줄바꿈 형식에 맞춘다.
+        /// LLM은 \n만 반환하는 경우가 많지만, Windows 파일은 \r\n을 사용한다.
+        /// </summary>
+        private static string NormalizeNewlines(string code, Microsoft.VisualStudio.Text.ITextSnapshot snapshot)
+        {
+            // 원본 문서에서 줄바꿈 형식을 감지 (첫 번째 줄의 LineBreak 사용)
+            string docNewline = "\r\n"; // 기본값은 Windows 줄바꿈
+            if (snapshot.LineCount > 1)
+            {
+                var firstLine = snapshot.GetLineFromLineNumber(0);
+                var lineBreakText = snapshot.GetText(firstLine.End, firstLine.LineBreakLength);
+                if (!string.IsNullOrEmpty(lineBreakText))
+                {
+                    docNewline = lineBreakText;
+                }
+            }
+
+            // LLM 응답의 줄바꿈을 먼저 \n으로 통일한 뒤, 원본 형식으로 변환
+            code = code.Replace("\r\n", "\n").Replace("\r", "\n");
+            if (docNewline != "\n")
+            {
+                code = code.Replace("\n", docNewline);
+            }
+
+            return code;
+        }
+
+        /// <summary>
+        /// 원본 문서의 들여쓰기 스타일(탭 vs 스페이스)을 감지하고,
+        /// LLM 응답의 들여쓰기를 원본 스타일에 맞춰 변환한다.
+        /// </summary>
+        private static string NormalizeIndentation(string code, Microsoft.VisualStudio.Text.ITextSnapshot snapshot)
+        {
+            // 원본 문서의 들여쓰기 스타일 감지: 탭 사용 줄 vs 스페이스 사용 줄 카운트
+            int tabLines = 0;
+            int spaceLines = 0;
+            int lineCount = Math.Min(snapshot.LineCount, 100); // 최대 100줄 샘플링
+            for (int i = 0; i < lineCount; i++)
+            {
+                var line = snapshot.GetLineFromLineNumber(i);
+                var text = line.GetText();
+                if (text.Length == 0) continue;
+                if (text[0] == '\t') tabLines++;
+                else if (text[0] == ' ' && text.Length >= 2) spaceLines++;
+            }
+
+            bool originalUsesTabs = tabLines > spaceLines;
+
+            // LLM 코드의 들여쓰기 스타일 감지
+            var codeLines = code.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            int llmTabLines = 0;
+            int llmSpaceLines = 0;
+            foreach (var cl in codeLines)
+            {
+                if (cl.Length == 0) continue;
+                if (cl[0] == '\t') llmTabLines++;
+                else if (cl[0] == ' ' && cl.Length >= 2) llmSpaceLines++;
+            }
+
+            bool llmUsesTabs = llmTabLines > llmSpaceLines;
+
+            // 스타일이 같으면 변환 불필요
+            if (originalUsesTabs == llmUsesTabs) return code;
+
+            if (originalUsesTabs && !llmUsesTabs)
+            {
+                // LLM이 스페이스를 사용 → 탭으로 변환
+                // 스페이스 단위 감지 (가장 짧은 들여쓰기 스페이스 수)
+                int indentUnit = DetectSpaceIndentUnit(codeLines);
+                if (indentUnit <= 0) return code;
+
+                var sb = new System.Text.StringBuilder(code.Length);
+                for (int i = 0; i < codeLines.Length; i++)
+                {
+                    if (i > 0) sb.Append("\r\n");
+                    var line = codeLines[i];
+                    int spaces = 0;
+                    while (spaces < line.Length && line[spaces] == ' ') spaces++;
+                    int tabCount = spaces / indentUnit;
+                    int remainder = spaces % indentUnit;
+                    sb.Append('\t', tabCount);
+                    sb.Append(' ', remainder);
+                    sb.Append(line, spaces, line.Length - spaces);
+                }
+                return sb.ToString();
+            }
+            else
+            {
+                // LLM이 탭을 사용 → 스페이스로 변환
+                // 원본의 스페이스 단위 감지
+                int indentUnit = 4; // 기본값
+                var origLines = new string[Math.Min(snapshot.LineCount, 100)];
+                for (int i = 0; i < origLines.Length; i++)
+                    origLines[i] = snapshot.GetLineFromLineNumber(i).GetText();
+                int detected = DetectSpaceIndentUnit(origLines);
+                if (detected > 0) indentUnit = detected;
+
+                var sb = new System.Text.StringBuilder(code.Length * 2);
+                for (int i = 0; i < codeLines.Length; i++)
+                {
+                    if (i > 0) sb.Append("\r\n");
+                    var line = codeLines[i];
+                    int tabs = 0;
+                    while (tabs < line.Length && line[tabs] == '\t') tabs++;
+                    sb.Append(' ', tabs * indentUnit);
+                    sb.Append(line, tabs, line.Length - tabs);
+                }
+                return sb.ToString();
+            }
+        }
+
+        /// <summary>
+        /// 스페이스 들여쓰기의 단위(2, 4, 8 등)를 감지한다.
+        /// 줄 앞 스페이스 수의 최대공약수(GCD)로 판단한다.
+        /// </summary>
+        private static int DetectSpaceIndentUnit(string[] lines)
+        {
+            int gcd = 0;
+            foreach (var line in lines)
+            {
+                if (string.IsNullOrEmpty(line)) continue;
+                int spaces = 0;
+                while (spaces < line.Length && line[spaces] == ' ') spaces++;
+                if (spaces < 2) continue; // 1칸은 의미 없음
+                gcd = gcd == 0 ? spaces : Gcd(gcd, spaces);
+            }
+            return gcd > 0 ? gcd : 4; // 감지 실패 시 기본 4
+        }
+
+        private static int Gcd(int a, int b)
+        {
+            while (b != 0) { int t = b; b = a % b; a = t; }
+            return a;
         }
 
         // ── 결과 표시 ──────────────────────────────────────────
@@ -442,6 +735,7 @@ namespace LocalMcpVsExtension.ToolWindows
             _btnCurrentFile.IsEnabled = !busy;
             _btnSelection.IsEnabled = !busy;
             _btnRefresh.IsEnabled = !busy;
+            _btnApply.IsEnabled = !busy && _lastResult != null;
             _cmbTool.IsEnabled = !busy;
             _txtServerUrl.IsEnabled = !busy;
         }

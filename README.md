@@ -9,7 +9,7 @@
 - **LLM 런타임**: Ollama (`/api/chat` 엔드포인트)
 - **기본 모델**: qwen2.5-coder:7b
 - **접속 방식**: SSE (VS 2022 Agent mode) 또는 Direct REST API (오프라인 CLI)
-- **상태**: `summarize_current_code` 도구 구현 · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v1.1 (테마·마크다운·동적도구)
+- **상태**: 4개 도구 구현 (summarize·add_comments·refactor·fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v1.1 (테마·마크다운·동적도구·코드적용)
 - **비목표**: GitHub Copilot 대체
 
 ## 구성
@@ -96,6 +96,9 @@ Invoke-RestMethod http://localhost:5100/api/tools/call -Method POST `
 | 도구 | 설명 | 상태 |
 |------|------|------|
 | `summarize_current_code` | 코드 텍스트를 받아 한국어로 구조화된 요약 | ✅ 구현 완료 |
+| `add_comments` | 코드에 문서 주석(XML doc, JSDoc 등) + 인라인 주석 자동 추가 | ✅ 구현 완료 |
+| `refactor_current_code` | 가독성·구조·현대적 표현 기반 코드 리팩터링 | ✅ 구현 완료 |
+| `fix_code_issues` | 버그·안티패턴·보안 취약점 탐지 및 수정 | ✅ 구현 완료 |
 | `search_project_code` | 프로젝트 내 코드 검색 | 🔲 미구현 |
 | `suggest_fix_from_error_log` | 에러 로그 기반 수정 제안 | 🔲 미구현 |
 | `ask_local_docs` | 현장 문서 질의응답 | 🔲 미구현 |
@@ -145,6 +148,10 @@ src/LocalMcpServer/
   ToolRegistry/IMcpTool.cs          — 도구 인터페이스
   ToolRegistry/ToolRegistryService.cs — 도구 등록·조회
   ToolRegistry/SummarizeCurrentCodeTool.cs — summarize_current_code 구현
+  ToolRegistry/CodeToolBase.cs              — 코드 수정 도구 공통 추상 클래스
+  ToolRegistry/AddCommentsTool.cs           — add_comments 구현
+  ToolRegistry/RefactorCurrentCodeTool.cs   — refactor_current_code 구현
+  ToolRegistry/FixCodeIssuesTool.cs         — fix_code_issues 구현
   ToolRegistry/PromptTemplateLoader.cs — 프롬프트 템플릿 로더
   McpServer/McpEndpoints.cs         — MCP SSE + Direct REST 엔드포인트
   prompts/                          — 프롬프트 템플릿 파일 (코드 수정 없이 튜닝 가능)
@@ -186,6 +193,7 @@ src/LocalMcpVsExtension/
 - VS Dark/Light/Blue 테마 자동 대응 (VsBrushes + VSColorTheme)
 - LLM 응답을 Markdown으로 렌더링 (헤딩, 리스트, 코드블록, 볼드 등)
 - 서버 도구 목록을 동적으로 로드하여 ComboBox에 표시 — 서버에 도구 추가 시 VSIX 재설치 불필요
+- 코드 수정 도구(add_comments, refactor, fix) 결과를 "📋 적용" 버튼으로 에디터에 즉시 반영
 
 ### 빌드
 
@@ -212,6 +220,7 @@ Visual Studio 2022 MSBuild를 사용한다:
 4. **현재 파일**: 편집기에서 파일을 열고 "현재 파일" 버튼 클릭
 5. **선택 영역**: 코드를 선택한 상태에서 "선택 영역" 버튼 클릭
 6. 결과가 **Markdown으로 렌더링**되어 Tool Window에 표시된다
+7. 코드 수정 도구 실행 후 **"📋 적용" 버튼**을 클릭하면 결과 코드가 에디터에 반영된다 (선택 영역 또는 전체 파일)
 
 서버 주소는 Tool Window 상단의 URL 필드에서 변경 가능하다 (기본: `http://localhost:5100`).
 

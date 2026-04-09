@@ -28,10 +28,16 @@ var promptsDir = Path.GetFullPath(config.Tools.PromptsDirectory);
 builder.Services.AddSingleton(sp =>
     new PromptTemplateLoader(promptsDir, sp.GetRequiredService<ILogger<PromptTemplateLoader>>()));
 builder.Services.AddSingleton<SummarizeCurrentCodeTool>();
+builder.Services.AddSingleton<AddCommentsTool>();
+builder.Services.AddSingleton<RefactorCurrentCodeTool>();
+builder.Services.AddSingleton<FixCodeIssuesTool>();
 builder.Services.AddSingleton<ToolRegistryService>(sp =>
 {
     var registry = new ToolRegistryService();
     registry.Register(sp.GetRequiredService<SummarizeCurrentCodeTool>());
+    registry.Register(sp.GetRequiredService<AddCommentsTool>());
+    registry.Register(sp.GetRequiredService<RefactorCurrentCodeTool>());
+    registry.Register(sp.GetRequiredService<FixCodeIssuesTool>());
     return registry;
 });
 

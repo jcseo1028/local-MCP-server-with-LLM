@@ -218,7 +218,66 @@ Output {
 
 - **사용 모듈**: Resource Cache (CodeSearchRequest)
 
-### 7c. suggest_fix_from_error_log
+### 7c. add_comments
+
+코드에 문서 주석(XML doc, JSDoc 등)과 인라인 주석을 자동 추가한다.
+기존 코드 로직은 수정하지 않는다.
+
+```
+Input {
+  code: string            // 주석을 추가할 코드 텍스트
+  language: string | null // 프로그래밍 언어 (null이면 자동 감지)
+}
+
+Output {
+  text: string            // 주석이 추가된 전체 코드
+}
+```
+
+- **사용 모듈**: LLM Connector (Temperature 0.2, MaxTokens 2048)
+- **프롬프트**: `prompts/add_comments.prompt.md`
+- **VSIX**: 결과를 에디터에 직접 적용 가능 ("적용" 버튼)
+
+### 7d. refactor_current_code
+
+코드를 리팩터링한다 (가독성 향상, 중복 제거, 구조 개선, 현대적 문법 적용).
+기존 동작은 보존한다.
+
+```
+Input {
+  code: string            // 리팩터링할 코드 텍스트
+  language: string | null // 프로그래밍 언어 (null이면 자동 감지)
+}
+
+Output {
+  text: string            // 변경 요약 + 리팩터링된 전체 코드
+}
+```
+
+- **사용 모듈**: LLM Connector (Temperature 0.3, MaxTokens 2048)
+- **프롬프트**: `prompts/refactor_current_code.prompt.md`
+- **VSIX**: 결과를 에디터에 직접 적용 가능 ("적용" 버튼)
+
+### 7e. fix_code_issues
+
+코드에서 버그, 안티패턴, 보안 취약점을 찾아 수정한다.
+
+```
+Input {
+  code: string            // 검사할 코드 텍스트
+  language: string | null // 프로그래밍 언어 (null이면 자동 감지)
+}
+
+Output {
+  text: string            // 발견된 이슈 목록 + 수정된 전체 코드
+}
+```
+
+- **사용 모듈**: LLM Connector (Temperature 0.2, MaxTokens 2048)
+- **프롬프트**: `prompts/fix_code_issues.prompt.md`
+- **VSIX**: 결과를 에디터에 직접 적용 가능 ("적용" 버튼)
+
+### 7f. suggest_fix_from_error_log
 
 예외 로그 또는 에러 메시지를 기반으로 수정 방향을 제안한다.
 
@@ -241,7 +300,7 @@ Output {
 
 - **사용 모듈**: LLM Connector (defaultModel), 선택적으로 Resource Cache (관련 문서 조회)
 
-### 7d. ask_local_docs
+### 7g. ask_local_docs
 
 현장 대응 문서(PDF, Excel, 체크리스트 등)에 대해 질의응답한다.
 

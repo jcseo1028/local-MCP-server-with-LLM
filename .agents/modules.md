@@ -24,7 +24,8 @@
 - **의존**: LLM Connector (도구 실행 시 필요한 경우에만), Resource Cache (도구 실행 시 자료 조회가 필요한 경우에만), Configuration
 - **비의존**: MCP Server
 - **프롬프트 관리**: 각 도구는 `Config.tools.promptsDirectory`에서 `{toolName}.prompt.md` 파일을 로드하여 변수 치환 후 LLMRequest.prompt로 전달한다. 코드 수정 없이 프롬프트 튜닝이 가능하다.
-- **구현**: `ToolRegistry/` — ToolRegistryService, SummarizeCurrentCodeTool, PromptTemplateLoader
+- **코드 수정 도구 패턴**: `CodeToolBase` 추상 클래스가 code+language 입력, LLM 호출, 옵션 오버라이드 패턴을 공통화한다. 개별 도구(AddCommentsTool, RefactorCurrentCodeTool, FixCodeIssuesTool)는 이를 상속하여 프롬프트와 LlmOptions만 정의한다.
+- **구현**: `ToolRegistry/` — ToolRegistryService, SummarizeCurrentCodeTool, CodeToolBase, AddCommentsTool, RefactorCurrentCodeTool, FixCodeIssuesTool, PromptTemplateLoader
 
 ## 3. LLM Connector
 
@@ -70,6 +71,7 @@
 - **VS 테마**: VsBrushes + VSColorTheme 기반 Dark/Light/Blue 자동 대응
 - **Markdown 렌더링**: Markdig AST → WPF FlowDocument 변환 (헤딩, 리스트, 코드블록, 볼드/이탤릭, 인용)
 - **동적 도구 로딩**: 시작 시 GET /api/tools/list로 서버 도구 목록 조회 → ComboBox에 표시. 서버에 도구 추가 시 VSIX 재설치 불필요.
+- **코드 적용 기능**: 코드 수정 도구(add_comments, refactor_current_code, fix_code_issues) 실행 결과를 "📋 적용" 버튼으로 에디터에 반영. 선택 영역이 있으면 선택 영역만, 없으면 전체 파일을 교체한다. LLM 응답에서 마지막 코드 펜스 블록을 추출하여 순수 코드만 적용한다.
 - **구현**: `src/LocalMcpVsExtension/` — VSIX 프로젝트 (Community.VisualStudio.Toolkit.17, Markdig)
 - **빌드 주의**: SDK-style csproj에서 `<Import Project="Sdk.props" />` / `<Import Project="Sdk.targets" />` 를 명시적으로 분리하고 VsSDK.targets를 Sdk.targets 뒤에 import해야 pkgdef 생성과 VSIX 패키징이 동작한다. VS 2022 MSBuild로 빌드한다.
 
