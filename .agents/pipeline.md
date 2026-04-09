@@ -134,8 +134,51 @@ ask_local_docs:
 ```
 임의 단계에서 에러 발생 시:
   → 에러를 MCP Error Response (contracts.md Response.error)로 래핑
-  → VS 2022 Agent Mode에 반환
+  → VS 2022 Agent Mode 또는 REST 클라이언트에 반환
 ```
+
+---
+
+## Direct REST Pipeline
+
+SSE 세션 없이 HTTP 요청으로 직접 도구를 호출한다. 오프라인 CLI 환경용.
+
+```
+1. [CLI 클라이언트 (외부)]
+   │  HTTP 요청 전송 (REST)
+   ▼
+2. [MCP Server] 요청 수신
+   ├─ GET /api/tools/list  → Tool Registry.ListTools() → JSON 응답
+   └─ POST /api/tools/call → Tool Registry.GetTool() → ExecuteAsync() → JSON 응답
+```
+
+- 기존 Main Request Pipeline, LLM Sub-Pipeline은 변경 없음.
+- MCP Server 내부에서 Tool Registry를 호출하는 경로는 동일.
+
+---
+
+## VS Extension Pipeline
+
+VS 2022 Tool Window에서 코드 요약을 실행한다. Direct REST Pipeline의 UI 래퍼.
+
+```
+1. [사용자 (외부)] VS 2022 Tool Window에서 "현재 파일 요약" 또는 "선택 영역 요약" 클릭
+   │
+   ▼
+2. [VS Extension] 활성 편집기에서 코드 텍스트 + 언어 획득
+   │
+   ▼
+3. [VS Extension] → [MCP Server] POST /api/tools/call (contracts.md §8)
+   │
+   ▼
+4. [MCP Server] Direct REST Pipeline 실행 → Tool Registry → LLM Sub-Pipeline
+   │
+   ▼
+5. [VS Extension] 응답 수신 → Tool Window에 결과 표시
+```
+
+- VS Extension은 MCP Server의 REST 클라이언트로만 동작한다.
+- 도구 실행 로직은 서버 측에서 처리한다.
 
 ---
 

@@ -1,0 +1,62 @@
+<Project>
+
+  <!-- SDK-style: 명시적 import로 순서 제어 (VsSDK.targets가 Sdk.targets 뒤에 와야 함) -->
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>LocalMcpVsExtension</RootNamespace>
+    <AssemblyName>LocalMcpVsExtension</AssemblyName>
+
+    <!-- VSIX -->
+    <GeneratePkgDefFile>true</GeneratePkgDefFile>
+    <UseCodebase>true</UseCodebase>
+    <CreateVsixContainer>true</CreateVsixContainer>
+    <DeployExtension Condition="'$(Configuration)' == 'Debug'">true</DeployExtension>
+    <IncludeAssemblyInVSIXContainer>true</IncludeAssemblyInVSIXContainer>
+    <IncludeDebugSymbolsInVSIXContainer>false</IncludeDebugSymbolsInVSIXContainer>
+    <IncludeDebugSymbolsInLocalVSIXDeployment>false</IncludeDebugSymbolsInLocalVSIXDeployment>
+    <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory>
+    <CopyOutputSymbolsToOutputDirectory>false</CopyOutputSymbolsToOutputDirectory>
+
+    <!-- F5 디버깅: VS Experimental Instance 실행 -->
+    <StartAction>Program</StartAction>
+    <StartProgram>$(DevEnvDir)devenv.exe</StartProgram>
+    <StartArguments>/rootsuffix Exp</StartArguments>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Community.VisualStudio.Toolkit.17" Version="17.0.507" />
+    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="17.12.2069">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="source.extension.vsixmanifest">
+      <SubType>Designer</SubType>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <VSCTCompile Include="VSCommandTable.vsct">
+      <ResourceName>Menus.ctmenu</ResourceName>
+    </VSCTCompile>
+  </ItemGroup>
+
+  <PropertyGroup>
+    <VsSDKToolsPath>$(NuGetPackageRoot)microsoft.vssdk.buildtools\17.12.2069\tools\vssdk\</VsSDKToolsPath>
+    <TemplateOutputDirectory>$(IntermediateOutputPath)Templates</TemplateOutputDirectory>
+    <VsixOutputPath>$(OutputPath)</VsixOutputPath>
+  </PropertyGroup>
+
+  <!-- Sdk.targets 먼저, 그 다음 VsSDK.targets (TargetPath 등 속성이 정의된 후 import) -->
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+  <Import Project="$(VsSDKToolsPath)Microsoft.VsSDK.targets"
+          Condition="Exists('$(VsSDKToolsPath)Microsoft.VsSDK.targets')" />
+
+</Project>

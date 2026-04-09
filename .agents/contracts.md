@@ -9,9 +9,12 @@
 
 ---
 
-## 1. VS 2022 Agent Mode ↔ MCP Server
+## 1. MCP 클라이언트 ↔ MCP Server
 
-MCP 프로토콜(JSON-RPC 2.0) 기반 통신. 클라이언트는 Visual Studio 2022 (17.14+) Agent mode이다.
+MCP 프로토콜(JSON-RPC 2.0) 기반 통신과 동기 REST API를 지원한다.
+
+- **SSE 클라이언트**: Visual Studio 2022 (17.14+) Agent mode
+- **REST 클라이언트**: PowerShell, curl, 또는 임의 HTTP 클라이언트 (오프라인 환경용)
 
 ```
 Request {
@@ -261,6 +264,49 @@ Output {
 ```
 
 - **사용 모듈**: Resource Cache (CacheLookupRequest) → LLM Connector (defaultModel, 검색 결과 기반 답변 생성)
+
+---
+
+## 8. Direct REST API
+
+SSE 세션 없이 MCP 도구를 직접 호출하는 동기 REST 엔드포인트. 오프라인 CLI 호출용.
+
+```
+GET /api/tools/list
+
+Response {
+  tools: [
+    {
+      name: string
+      description: string
+      inputSchema: object
+    }
+  ]
+}
+```
+
+```
+POST /api/tools/call
+Content-Type: application/json
+
+Request {
+  name: string          // 호출할 도구 이름
+  arguments: object     // 도구 입력 인자
+}
+
+Response {
+  content: [
+    {
+      type: string      // "text"
+      text: string      // 결과 텍스트
+    }
+  ]
+  error: string | null  // 에러 발생 시 메시지
+}
+```
+
+- ToolCallRequest/ToolCallResponse (§2)와 동일한 데이터를 단순 REST로 래핑한 것이다.
+- JSON-RPC 프레이밍, SSE 세션이 불필요하다.
 
 ---
 

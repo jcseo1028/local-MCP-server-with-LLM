@@ -5,22 +5,23 @@
 ## 개요
 
 - **목적**: 오프라인 환경에서 로컬 LLM + 로컬 MCP 서버 + 현장 자료 캐시로 코딩 보조 대응력 확보
-- **클라이언트**: Visual Studio 2022 (17.14 이상) Agent mode
+- **클라이언트**: Visual Studio 2022 (17.14+) Agent mode / 오프라인 CLI (Direct REST)
 - **LLM 런타임**: Ollama (`/api/chat` 엔드포인트)
 - **기본 모델**: qwen2.5-coder:7b
-- **전송 방식**: SSE (Server-Sent Events)
-- **상태**: `summarize_current_code` 도구 구현 및 VS 2022 연동 검증 완료
+- **접속 방식**: SSE (VS 2022 Agent mode) 또는 Direct REST API (오프라인 CLI)
+- **상태**: `summarize_current_code` 도구 구현 · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) 완료
 - **비목표**: GitHub Copilot 대체
 
 ## 구성
 
 | 구성요소 | 역할 |
 |----------|------|
-| MCP Server | VS 2022 Agent mode의 MCP 요청을 수신·응답 |
+| MCP Server | VS 2022 SSE + CLI Direct REST 요청을 수신·응답 |
 | Tool Registry | MCP 도구 등록·조회·실행 |
 | LLM Connector | 로컬 LLM과의 통신 추상화 |
 | Resource Cache | 현장 필수 자료(문서, 표준, 참조)의 로컬 조회 |
 | Configuration | 서버·모델·도구·캐시 설정 중앙 관리 |
+| VS Extension (VSIX) | VS 2022 Tool Window에서 코드 요약 UI 제공 |
 
 ## 요구사항
 
@@ -47,9 +48,48 @@ dotnet run
 
 서버가 `http://localhost:5100` 에서 시작된다.
 
-### 3. VS 2022 연결
+### 3. VS 2022 연결 (온라인 환경)
 
 솔루션 루트의 `.vs/mcp.json` 이 이미 설정되어 있다. VS 2022에서 솔루션을 열고 Agent mode 채팅에서 MCP 도구를 사용할 수 있다.
+
+### 4. CLI 직접 호출 (오프라인 환경)
+
+인터넷이 없는 환경에서는 VS 2022 Agent mode가 MCP 도구를 호출할 수 없다. 이 경우 Direct REST API를 통해 CLI에서 직접 호출한다.
+
+**도구 목록 조회:**
+
+```bash
+curl http://localhost:5100/api/tools/list
+```
+
+**도구 호출 (코드 요약 예시):**
+
+```bash
+curl -X POST http://localhost:5100/api/tools/call \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "summarize_current_code",
+    "arguments": {
+      "code": "public class Foo { public int Bar() { return 42; } }",
+      "language": "csharp"
+    }
+  }'
+```
+
+**PowerShell 예시:**
+
+```powershell
+# 도구 목록
+Invoke-RestMethod http://localhost:5100/api/tools/list
+
+# 코드 요약
+$body = @{
+  name = "summarize_current_code"
+  arguments = @{ code = (Get-Content D:\_Github_LLM\local-MCP-server-with-LLM\src\LocalMcpServer\LlmConnector\LlmModels.cs -Raw); language = "csharp" }
+} | ConvertTo-Json
+Invoke-RestMethod http://localhost:5100/api/tools/call -Method POST `
+  -ContentType "application/json" -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
+```
 
 ### 현재 지원 도구
 
@@ -60,7 +100,10 @@ dotnet run
 | `suggest_fix_from_error_log` | 에러 로그 기반 수정 제안 | 🔲 미구현 |
 | `ask_local_docs` | 현장 문서 질의응답 | 🔲 미구현 |
 
-## VS 2022 MCP 연결 설정
+## VS 2022 MCP 연결 설정 (SSE)
+
+> 인터넷이 필요한 온라인 환경에서 VS 2022 Agent mode를 통해 MCP 도구를 사용하는 방법이다.
+> 오프라인 환경에서는 위의 "CLI 직접 호출" 섹션을 참고한다.
 
 ### 방법 1: 솔루션별 설정 (권장)
 
@@ -103,9 +146,21 @@ src/LocalMcpServer/
   ToolRegistry/ToolRegistryService.cs — 도구 등록·조회
   ToolRegistry/SummarizeCurrentCodeTool.cs — summarize_current_code 구현
   ToolRegistry/PromptTemplateLoader.cs — 프롬프트 템플릿 로더
-  McpServer/McpEndpoints.cs         — MCP SSE 엔드포인트 (JSON-RPC 2.0)
+  McpServer/McpEndpoints.cs         — MCP SSE + Direct REST 엔드포인트
   prompts/                          — 프롬프트 템플릿 파일 (코드 수정 없이 튜닝 가능)
   appsettings.json                  — 서버 설정
+
+src/LocalMcpVsExtension/
+  LocalMcpVsExtension.csproj        — SDK-style VSIX 프로젝트 (\u0046ramework 4.8)
+  source.extension.vsixmanifest     — VSIX 매니페스트 (VS 2022 17.14+)
+  VSCommandTable.vsct               — 메뉴 커맨드 테이블
+  VSCommandTable.cs                 — 커맨드 GUID/ID 상수
+  LocalMcpVsExtensionPackage.cs     — VS 패키지 진입점
+  Commands/ShowSummaryWindowCommand.cs — Tool Window 열기 커맨드
+  ToolWindows/SummaryToolWindow.cs  — Tool Window 정의
+  ToolWindows/SummaryToolWindowControl.cs — WPF UI (프로그래밍 방식)
+  Services/McpRestClient.cs         — MCP Server REST 클라이언트
+  Services/LanguageDetector.cs      — 파일 확장자 → 언어 매핑
 .vs/mcp.json                        — VS 2022 MCP 연결 설정
 ```
 
@@ -113,10 +168,112 @@ src/LocalMcpServer/
 
 `src/LocalMcpServer/prompts/` 디렉터리의 `.prompt.md` 파일을 수정하면 서버 재시작 없이 프롬프트가 반영된다. `{{variable}}` 형식의 변수 치환을 지원한다.
 
+## 접속 방식 비교
+
+| 환경 | 접속 방법 | 엔드포인트 | 비고 |
+|------|-----------|-----------|------|
+| 온라인 | VS 2022 Agent mode (SSE) | `GET /sse` + `POST /message` | Copilot 확장 필요 |
+| 오프라인 | VS 2022 확장 (VSIX) | `POST /api/tools/call` | IDE 통합 Tool Window |
+| 오프라인 | CLI / 스크립트 (REST) | `GET /api/tools/list` + `POST /api/tools/call` | IDE 무관 |
+
+두 방식 모두 동일한 MCP 서버 프로세스를 공유하며, 같은 도구와 LLM 커넥터를 사용한다.
+
+## VS 2022 확장 (VSIX) — 오프라인 IDE 통합
+
+인터넷이 없는 환경에서 VS 2022 안에서 직접 코드 요약을 사용할 수 있는 Tool Window 확장이다.
+
+### 빌드
+
+Visual Studio 2022 MSBuild를 사용한다:
+
+```powershell
+& "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe" `
+  src\LocalMcpVsExtension\LocalMcpVsExtension.csproj /t:Rebuild /p:Configuration=Release
+```
+
+빌드 결과: `src/LocalMcpVsExtension/bin/Release/net48/LocalMcpVsExtension.vsix`
+
+### 설치
+
+1. VS 2022를 닫는다
+2. `LocalMcpVsExtension.vsix` 파일을 더블클릭하여 설치한다
+3. VS 2022를 다시 연다
+
+### 사용
+
+1. **MCP 서버 실행**: `cd src/LocalMcpServer && dotnet run`
+2. **Tool Window 열기**: VS 메뉴 → **보기 → 다른 창 → Local MCP 코드 요약**
+3. **현재 파일 요약**: 편집기에서 파일을 열고 "현재 파일 요약" 버튼 클릭
+4. **선택 영역 요약**: 코드를 선택한 상태에서 "선택 영역 요약" 버튼 클릭
+
+서버 주소는 Tool Window 상단의 URL 필드에서 변경 가능하다 (기본: `http://localhost:5100`).
+
+## Direct REST API 레퍼런스
+
+### `GET /api/tools/list`
+
+등록된 도구 목록을 반환한다.
+
+**응답 예시:**
+
+```json
+{
+  "tools": [
+    {
+      "name": "summarize_current_code",
+      "description": "현재 파일 또는 선택 영역의 코드를 요약합니다.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "string", "description": "요약 대상 코드 텍스트" },
+          "language": { "type": "string", "description": "프로그래밍 언어 (선택)" }
+        },
+        "required": ["code"]
+      }
+    }
+  ]
+}
+```
+
+### `POST /api/tools/call`
+
+도구를 실행하고 결과를 반환한다.
+
+**요청 바디:**
+
+```json
+{
+  "name": "summarize_current_code",
+  "arguments": {
+    "code": "public class Foo { ... }",
+    "language": "csharp"
+  }
+}
+```
+
+**성공 응답:**
+
+```json
+{
+  "content": [
+    { "type": "text", "text": "### 1. 전체 목적\n..." }
+  ]
+}
+```
+
+**에러 응답 (도구 없음):**
+
+```json
+{
+  "error": "Tool not found: unknown_tool"
+}
+```
+
 ## 알려진 제한사항
 
 - VS 2022 Agent mode는 **GitHub Copilot 확장이 설치**되어 있어야 MCP 도구를 사용할 수 있다
-- 현재 Copilot의 클라우드 모델이 MCP 도구 호출 여부를 판단하므로, **완전 오프라인 환경에서는 별도 MCP 클라이언트가 필요**하다
+- 현재 Copilot의 클라우드 모델이 MCP 도구 호출 여부를 판단하므로, **완전 오프라인 환경에서는 VSIX 확장 또는 CLI REST를 사용**해야 한다
+- VSIX 확장은 VS 2022 MSBuild로 빌드해야 한다 (`dotnet build`만으로는 `.vsix` 파일이 생성되지 않음)
 - 7B 모델의 요약 품질은 제한적이다. 더 큰 모델(14b+)을 사용하면 품질이 향상된다
 
 ## 문서

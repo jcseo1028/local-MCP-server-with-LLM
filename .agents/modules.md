@@ -9,11 +9,12 @@
 ## 1. MCP Server
 
 - **책임**: MCP 프로토콜 준수, VS 2022 Agent mode 요청 수신, 메서드 라우팅, 응답 반환
-- **입력**: MCP 클라이언트 요청 (JSON-RPC) — 클라이언트는 VS 2022 Agent mode
-- **출력**: MCP 프로토콜 응답 (JSON-RPC)
+- **입력**: MCP 클라이언트 요청 (JSON-RPC) — 클라이언트는 VS 2022 Agent mode 또는 REST 클라이언트
+- **출력**: MCP 프로토콜 응답 (JSON-RPC) 또는 REST JSON 응답
 - **의존**: Tool Registry, Configuration
 - **비의존**: LLM Connector (직접 호출하지 않음), Resource Cache (직접 접근하지 않음)
-- **구현**: `McpServer/McpEndpoints.cs` — SSE 전송 방식 (`GET /sse`, `POST /message`), JSON 직렬화는 `JsonSerializerOptions`(camelCase) 사용
+- **동기 REST**: `GET /api/tools/list`, `POST /api/tools/call` — SSE 세션 없이 직접 도구 실행. 오프라인 CLI 호출용.
+- **구현**: `McpServer/McpEndpoints.cs` — SSE 전송 방식 (`GET /sse`, `POST /message`) + 동기 REST 엔드포인트, JSON 직렬화는 `JsonSerializerOptions`(camelCase) 사용
 
 ## 2. Tool Registry
 
@@ -57,6 +58,17 @@
 - **출력**: Config 객체 (`contracts.md` 참조)
 - **의존**: 없음
 - **구현**: `Configuration/ServerConfig.cs` + `appsettings.json`
+
+## 6. VS Extension (VSIX)
+
+- **책임**: VS 2022 내 Tool Window UI 제공, 현재 편집 파일/선택 영역 코드 획득, MCP Server REST API 호출, 결과 표시
+- **입력**: 사용자 버튼 클릭 (현재 파일 요약, 선택 영역 요약)
+- **출력**: Tool Window에 요약 결과 텍스트 표시
+- **의존**: MCP Server (REST API — contracts.md §8)
+- **비의존**: Tool Registry, LLM Connector, Resource Cache, Configuration (모두 서버 측)
+- **제약**: VS 2022 17.14+ 전용, .NET Framework 4.8, 오프라인 환경에서도 동작 (서버가 로컬이므로)
+- **구현**: `src/LocalMcpVsExtension/` — VSIX 프로젝트 (Community.VisualStudio.Toolkit.17)
+- **빌드 주의**: SDK-style csproj에서 `<Import Project="Sdk.props" />` / `<Import Project="Sdk.targets" />` 를 명시적으로 분리하고 VsSDK.targets를 Sdk.targets 뒤에 import해야 pkgdef 생성과 VSIX 패키징이 동작한다. VS 2022 MSBuild로 빌드한다.
 
 ---
 

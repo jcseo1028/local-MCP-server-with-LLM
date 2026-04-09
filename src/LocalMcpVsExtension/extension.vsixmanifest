@@ -1,0 +1,25 @@
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
+  <Metadata>
+    <Identity Id="LocalMcpVsExtension.d8f7a321-5b2e-4c9f-b6e8-1a2b3c4d5e6f" Version="1.0.0" Language="ko-KR" Publisher="Local MCP" />
+    <DisplayName>Local MCP 코드 요약</DisplayName>
+    <Description xml:space="preserve">오프라인 환경에서 로컬 MCP 서버의 코드 요약 도구를 VS 2022 Tool Window에서 직접 호출합니다.</Description>
+    <Tags>MCP, 코드요약, 오프라인, LLM</Tags>
+  </Metadata>
+  <Installation>
+    <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.14, 18.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+    <InstallationTarget Id="Microsoft.VisualStudio.Pro" Version="[17.14, 18.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+    <InstallationTarget Id="Microsoft.VisualStudio.Enterprise" Version="[17.14, 18.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+  </Installation>
+  <Dependencies>
+    <Dependency Id="Microsoft.Framework.NDP" DisplayName="Microsoft .NET Framework" Version="[4.8,)" />
+  </Dependencies>
+  <Prerequisites>
+    <Prerequisite Id="Microsoft.VisualStudio.Component.CoreEditor" Version="[17.14,18.0)" DisplayName="Visual Studio 핵심 편집기" />
+  </Prerequisites>
+</PackageManifest>

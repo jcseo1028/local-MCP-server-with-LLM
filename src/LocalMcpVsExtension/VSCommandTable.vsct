@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable"
+              xmlns:xs="http://www.w3.org/2001/XMLSchema">
+
+  <Extern href="stdidcmd.h" />
+  <Extern href="vsshlids.h" />
+
+  <Commands package="guidLocalMcpVsExtensionPackage">
+    <Buttons>
+      <!-- View → Other Windows → Local MCP 코드 요약 -->
+      <Button guid="guidLocalMcpVsExtensionPackageCmdSet"
+              id="ShowSummaryWindowCommand"
+              priority="0x0100"
+              type="Button">
+        <Parent guid="guidSHLMainMenu" id="IDG_VS_WNDO_OTRWNDWS1" />
+        <Strings>
+          <ButtonText>Local MCP 코드 요약</ButtonText>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+
+  <Symbols>
+    <GuidSymbol name="guidLocalMcpVsExtensionPackage"
+                value="{d8f7a321-5b2e-4c9f-b6e8-1a2b3c4d5e6f}" />
+    <GuidSymbol name="guidLocalMcpVsExtensionPackageCmdSet"
+                value="{e9a8b712-6c3f-4d0a-c7f9-2b3c4d5e6f7a}">
+      <IDSymbol name="ShowSummaryWindowCommand" value="0x0100" />
+    </GuidSymbol>
+  </Symbols>
+
+</CommandTable>
