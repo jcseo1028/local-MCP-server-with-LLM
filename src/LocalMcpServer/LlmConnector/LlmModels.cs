@@ -14,9 +14,9 @@ public sealed class LlmRequest
 public sealed class LlmOptions
 {
     public double Temperature { get; set; } = 0.3;
-    public int MaxTokens { get; set; } = 512;
+    public int MaxTokens { get; set; } = 1024;
     /// <summary>Ollama num_ctx — 컨텍스트 윈도우 크기. 작을수록 빠름.</summary>
-    public int NumCtx { get; set; } = 2048;
+    public int NumCtx { get; set; } = 4096;
 }
 
 /// <summary>

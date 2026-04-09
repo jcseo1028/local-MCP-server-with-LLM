@@ -61,8 +61,8 @@ public sealed class SummarizeCurrentCodeTool : IMcpTool
             Options = new LlmOptions
             {
                 Temperature = 0.3,
-                MaxTokens = 512,
-                NumCtx = 2048
+                MaxTokens = 1024,
+                NumCtx = 4096
             }
         }, ct);
 

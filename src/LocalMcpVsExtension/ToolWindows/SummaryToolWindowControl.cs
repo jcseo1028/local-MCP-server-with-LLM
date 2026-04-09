@@ -54,15 +54,8 @@ namespace LocalMcpVsExtension.ToolWindows
                 Margin = new Thickness(0, 0, 4, 4),
                 VerticalAlignment = VerticalAlignment.Center
             };
-            _cmbTool.SetResourceReference(Control.BackgroundProperty, VsBrushes.WindowKey);
-            _cmbTool.SetResourceReference(Control.ForegroundProperty, VsBrushes.WindowTextKey);
-            _cmbTool.SetResourceReference(Control.BorderBrushProperty, VsBrushes.ActiveBorderKey);
-
-            // ComboBox 드롭다운 항목 스타일 — Dark Theme에서 텍스트가 보이도록
-            var itemStyle = new Style(typeof(ComboBoxItem));
-            itemStyle.Setters.Add(new Setter(Control.ForegroundProperty, new DynamicResourceExtension(VsBrushes.WindowTextKey)));
-            itemStyle.Setters.Add(new Setter(Control.BackgroundProperty, new DynamicResourceExtension(VsBrushes.WindowKey)));
-            _cmbTool.ItemContainerStyle = itemStyle;
+            // VS 내장 테마 스타일 적용 — Dark/Light 모두 자동 대응
+            _cmbTool.SetResourceReference(FrameworkElement.StyleProperty, VsResourceKeys.ComboBoxStyleKey);
 
             toolbar.Children.Add(_cmbTool);
 
@@ -242,7 +235,6 @@ namespace LocalMcpVsExtension.ToolWindows
                         ToolTip = tool.Description,
                         Tag = tool.Name
                     };
-                    item.SetResourceReference(Control.ForegroundProperty, VsBrushes.WindowTextKey);
                     _cmbTool.Items.Add(item);
                 }
 

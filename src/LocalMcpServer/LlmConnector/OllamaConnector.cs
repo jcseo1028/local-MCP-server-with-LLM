@@ -42,7 +42,7 @@ public sealed class OllamaConnector
             {
                 Temperature = request.Options.Temperature,
                 NumPredict = request.Options.MaxTokens,
-                NumCtx = request.Options.NumCtx > 0 ? request.Options.NumCtx : 2048
+                NumCtx = request.Options.NumCtx > 0 ? request.Options.NumCtx : 4096
             }
         };
 
