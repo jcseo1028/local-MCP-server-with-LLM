@@ -10,6 +10,7 @@ namespace LocalMcpVsExtension.Services
     /// <summary>
     /// MCP Server Direct REST API 클라이언트.
     /// contracts.md §8 (GET /api/tools/list, POST /api/tools/call) 준수.
+    /// contracts.md §9, §10 (POST /api/chat, POST /api/chat/approve) 준수.
     /// </summary>
     internal sealed class McpRestClient
     {
@@ -72,6 +73,42 @@ namespace LocalMcpVsExtension.Services
 
             return "(응답 없음)";
         }
+
+        /// <summary>
+        /// 채팅 메시지를 전송한다. (POST /api/chat, contracts.md §9)
+        /// </summary>
+        public async Task<ChatResponse> SendChatAsync(string serverUrl, ChatRequest request)
+        {
+            var json = JsonSerializer.Serialize(request, s_jsonOptions);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var response = await s_http.PostAsync(
+                $"{serverUrl}/api/chat", content).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+
+            var responseJson = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            return JsonSerializer.Deserialize<ChatResponse>(responseJson, s_jsonOptions)
+                ?? new ChatResponse();
+        }
+
+        /// <summary>
+        /// 코드 변경 승인/거부를 전송한다. (POST /api/chat/approve, contracts.md §10)
+        /// </summary>
+        public async Task<ChatApprovalResponse> SendApprovalAsync(
+            string serverUrl, string conversationId, bool approved)
+        {
+            var request = new { conversationId, approved };
+            var json = JsonSerializer.Serialize(request, s_jsonOptions);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var response = await s_http.PostAsync(
+                $"{serverUrl}/api/chat/approve", content).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+
+            var responseJson = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            return JsonSerializer.Deserialize<ChatApprovalResponse>(responseJson, s_jsonOptions)
+                ?? new ChatApprovalResponse();
+        }
     }
 
     // ── DTO: 도구 목록 ──────────────────────────────────────
@@ -105,5 +142,45 @@ namespace LocalMcpVsExtension.Services
     {
         public string Type { get; set; } = "";
         public string? Text { get; set; }
+    }
+
+    // ── DTO: 채팅 (contracts.md §9, §10) ────────────────────
+
+    internal sealed class ChatRequest
+    {
+        public string Message { get; set; } = "";
+        public string? Code { get; set; }
+        public string? Language { get; set; }
+        public bool SelectionOnly { get; set; }
+        public string? ConversationId { get; set; }
+    }
+
+    internal sealed class ChatResponse
+    {
+        public string? ConversationId { get; set; }
+        public ChatIntent? Intent { get; set; }
+        public string? Result { get; set; }
+        public ChatCodeChange? CodeChange { get; set; }
+        public bool RequiresApproval { get; set; }
+    }
+
+    internal sealed class ChatIntent
+    {
+        public string? ToolName { get; set; }
+        public double Confidence { get; set; }
+        public string? Description { get; set; }
+    }
+
+    internal sealed class ChatCodeChange
+    {
+        public string? Original { get; set; }
+        public string? Modified { get; set; }
+        public string? ToolName { get; set; }
+    }
+
+    internal sealed class ChatApprovalResponse
+    {
+        public bool Success { get; set; }
+        public string? Message { get; set; }
     }
 }

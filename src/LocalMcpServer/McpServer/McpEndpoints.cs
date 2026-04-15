@@ -165,6 +165,208 @@ public static class McpEndpoints
                 return Results.Json(new { content = Array.Empty<object>(), error = ex.Message }, s_jsonOptions);
             }
         });
+
+        // --- Chat REST 엔드포인트 (contracts.md §9, §10) ---
+
+        // 채팅 메시지 처리 (의도 분석 → 도구 실행)
+        app.MapPost("/api/chat", async (HttpContext ctx, CancellationToken ct) =>
+        {
+            var logger = ctx.RequestServices.GetRequiredService<ILogger<IntentResolver>>();
+            var intentResolver = ctx.RequestServices.GetRequiredService<IntentResolver>();
+            var conversationStore = ctx.RequestServices.GetRequiredService<IConversationStore>();
+            var registry = ctx.RequestServices.GetRequiredService<ToolRegistryService>();
+
+            using var reader = new StreamReader(ctx.Request.Body);
+            var body = await reader.ReadToEndAsync(ct);
+
+            try
+            {
+                var request = JsonSerializer.Deserialize<JsonElement>(body);
+
+                var message = request.GetProperty("message").GetString() ?? "";
+                var code = request.TryGetProperty("code", out var codeProp) && codeProp.ValueKind != JsonValueKind.Null
+                    ? codeProp.GetString() : null;
+                var language = request.TryGetProperty("language", out var langProp) && langProp.ValueKind != JsonValueKind.Null
+                    ? langProp.GetString() : null;
+                var selectionOnly = request.TryGetProperty("selectionOnly", out var selProp) && selProp.GetBoolean();
+                var conversationId = request.TryGetProperty("conversationId", out var convProp) && convProp.ValueKind != JsonValueKind.Null
+                    ? convProp.GetString() : null;
+
+                // 대화 상태 가져오기/생성
+                var conversation = conversationStore.GetOrCreate(conversationId);
+                conversation.AddMessage("user", message);
+
+                // 만료된 대화 정리 (비동기적으로)
+                conversationStore.CleanupExpired();
+
+                logger.LogInformation("Chat 요청: conversationId={ConvId}, message={Msg}",
+                    conversation.ConversationId, message.Length > 50 ? message[..50] + "..." : message);
+
+                // 의도 분석
+                using var llmCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+                var intent = await intentResolver.AnalyzeIntentAsync(message, language, llmCts.Token);
+
+                string resultText;
+                object? codeChange = null;
+                var requiresApproval = false;
+
+                if (intent.ToolName is not null && intent.Confidence >= 0.5)
+                {
+                    // 도구 실행
+                    var tool = registry.GetTool(intent.ToolName);
+                    if (tool is not null)
+                    {
+                        var arguments = new Dictionary<string, object?>
+                        {
+                            ["code"] = code ?? "",
+                            ["language"] = language ?? ""
+                        };
+
+                        var toolResult = await tool.ExecuteAsync(arguments, llmCts.Token);
+                        resultText = toolResult.Content.FirstOrDefault()?.Text ?? "(결과 없음)";
+
+                        // 코드 수정 도구면 승인 필요
+                        if (IntentResolver.IsEditTool(intent.ToolName) && code is not null)
+                        {
+                            var modifiedCode = ExtractCodeFromResult(resultText);
+                            codeChange = new
+                            {
+                                original = code,
+                                modified = modifiedCode ?? resultText,
+                                toolName = intent.ToolName
+                            };
+                            requiresApproval = true;
+
+                            conversation.PendingChange = new PendingCodeChange
+                            {
+                                Original = code,
+                                Modified = modifiedCode ?? resultText,
+                                ToolName = intent.ToolName
+                            };
+                        }
+                    }
+                    else
+                    {
+                        resultText = $"도구 '{intent.ToolName}'을(를) 찾을 수 없습니다.";
+                    }
+                }
+                else
+                {
+                    // 일반 대화 응답
+                    var history = conversation.FormatHistoryForPrompt();
+                    resultText = await intentResolver.GenerateChatResponseAsync(
+                        message, code, language, history, llmCts.Token);
+                }
+
+                conversation.AddMessage("assistant", resultText);
+
+                return Results.Json(new
+                {
+                    conversationId = conversation.ConversationId,
+                    intent = new
+                    {
+                        toolName = intent.ToolName,
+                        confidence = intent.Confidence,
+                        description = intent.Description
+                    },
+                    result = resultText,
+                    codeChange,
+                    requiresApproval
+                }, s_jsonOptions);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Chat 처리 오류");
+                return Results.Json(new
+                {
+                    conversationId = (string?)null,
+                    intent = new { toolName = (string?)null, confidence = 0.0, description = "오류 발생" },
+                    result = "오류가 발생했습니다: " + ex.Message,
+                    codeChange = (object?)null,
+                    requiresApproval = false
+                }, s_jsonOptions);
+            }
+        });
+
+        // 코드 변경 승인/거부
+        app.MapPost("/api/chat/approve", async (HttpContext ctx, CancellationToken ct) =>
+        {
+            var logger = ctx.RequestServices.GetRequiredService<ILogger<IntentResolver>>();
+            var conversationStore = ctx.RequestServices.GetRequiredService<IConversationStore>();
+
+            using var reader = new StreamReader(ctx.Request.Body);
+            var body = await reader.ReadToEndAsync(ct);
+
+            try
+            {
+                var request = JsonSerializer.Deserialize<JsonElement>(body);
+
+                var conversationId = request.GetProperty("conversationId").GetString() ?? "";
+                var approved = request.GetProperty("approved").GetBoolean();
+
+                var conversation = conversationStore.Get(conversationId);
+                if (conversation is null)
+                {
+                    return Results.Json(new { success = false, message = "대화 세션을 찾을 수 없습니다." }, s_jsonOptions);
+                }
+
+                if (approved)
+                {
+                    logger.LogInformation("코드 변경 승인: {ConvId}", conversationId);
+                    conversation.AddMessage("system", "사용자가 코드 변경을 승인했습니다.");
+                }
+                else
+                {
+                    logger.LogInformation("코드 변경 거부: {ConvId}", conversationId);
+                    conversation.AddMessage("system", "사용자가 코드 변경을 거부했습니다.");
+                }
+
+                conversation.PendingChange = null;
+
+                return Results.Json(new
+                {
+                    success = true,
+                    message = approved ? "적용 완료" : "취소됨"
+                }, s_jsonOptions);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Chat approve 처리 오류");
+                return Results.Json(new { success = false, message = ex.Message }, s_jsonOptions);
+            }
+        });
+    }
+
+    /// <summary>
+    /// LLM 응답에서 마지막 코드 블록을 추출한다.
+    /// </summary>
+    private static string? ExtractCodeFromResult(string result)
+    {
+        var lastFenceStart = -1;
+        var lastFenceEnd = -1;
+        var searchFrom = 0;
+
+        while (true)
+        {
+            var start = result.IndexOf("```", searchFrom, StringComparison.Ordinal);
+            if (start < 0) break;
+
+            var contentStart = result.IndexOf('\n', start);
+            if (contentStart < 0) break;
+            contentStart++;
+
+            var end = result.IndexOf("```", contentStart, StringComparison.Ordinal);
+            if (end < 0) break;
+
+            lastFenceStart = contentStart;
+            lastFenceEnd = end;
+            searchFrom = end + 3;
+        }
+
+        if (lastFenceStart >= 0 && lastFenceEnd > lastFenceStart)
+            return result[lastFenceStart..lastFenceEnd].TrimEnd();
+
+        return null;
     }
 
     private static async Task<string?> HandleJsonRpcAsync(

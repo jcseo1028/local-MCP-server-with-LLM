@@ -165,6 +165,11 @@ Config {
     filePatterns: [string] // 색인 대상 파일 패턴 (예: ["*.cs", "*.xaml"])
     strategy: string      // 색인 전략: "hybrid" (default) | "text" | "ast"
   }
+  chat: {
+    intentModel: string | null   // 의도 분석용 모델 (null이면 defaultModel)
+    conversationTimeoutMinutes: number // 대화 세션 타임아웃 (기본 30)
+    maxConversationHistory: number     // 대화당 최대 메시지 수 (기본 20)
+  }
 }
 ```
 
@@ -366,6 +371,70 @@ Response {
 
 - ToolCallRequest/ToolCallResponse (§2)와 동일한 데이터를 단순 REST로 래핑한 것이다.
 - JSON-RPC 프레이밍, SSE 세션이 불필요하다.
+
+---
+
+## 9. Chat API (VS Extension ↔ MCP Server)
+
+사용자 자연어 입력을 받아 의도 분석 → 도구 선택 → 실행 → 결과 반환을 서버에서 일괄 처리한다.
+
+```
+POST /api/chat
+Content-Type: application/json
+
+ChatRequest {
+  message: string              // 사용자 입력 메시지 (자연어)
+  code: string | null          // 현재 에디터 코드 (선택 영역 또는 전체 파일)
+  language: string | null      // 프로그래밍 언어
+  selectionOnly: boolean       // 선택 영역 여부
+  conversationId: string | null // 대화 세션 ID (null이면 새 대화 시작)
+}
+
+ChatResponse {
+  conversationId: string       // 대화 세션 ID
+  intent: {                    // 분석된 의도 정보
+    toolName: string | null    // 선택된 도구 (null이면 일반 대화)
+    confidence: number         // 의도 확신도 (0.0 ~ 1.0)
+    description: string        // 의도 요약 설명
+  }
+  result: string               // 결과 텍스트 (Markdown)
+  codeChange: {                // 코드 변경 제안 (null이면 코드 변경 없음)
+    original: string           // 원본 코드
+    modified: string           // 변경된 코드
+    toolName: string           // 사용된 도구명
+  } | null
+  requiresApproval: boolean    // 사용자 승인 필요 여부 (codeChange가 있으면 true)
+}
+```
+
+- 의도 분석은 MCP Server 내부 IntentResolver가 LLM Connector를 직접 호출하여 수행한다.
+- toolName이 결정되면 기존 Tool Registry를 통해 도구를 실행한다 (§2 재활용).
+- 대화 이력은 서버 메모리 ConversationStore에 보관되며 LLM 컨텍스트에 포함된다.
+
+---
+
+## 10. Chat Approval API (VS Extension → MCP Server)
+
+코드 변경 승인/거부를 서버에 알린다.
+
+```
+POST /api/chat/approve
+Content-Type: application/json
+
+ChatApprovalRequest {
+  conversationId: string       // 대화 세션 ID
+  approved: boolean            // 승인(true) / 거부(false)
+}
+
+ChatApprovalResponse {
+  success: boolean
+  message: string              // "적용 완료" 또는 "취소됨"
+}
+```
+
+- 승인 시 VSIX가 에디터에 코드를 적용한 후 서버에 통지한다.
+- 거부 시 코드 적용 없이 서버에 통지한다.
+- 서버는 대화 상태를 갱신하여 후속 대화의 맥락에 반영한다.
 
 ---
 

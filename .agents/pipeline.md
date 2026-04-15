@@ -182,6 +182,97 @@ VS 2022 Tool Window에서 코드 요약을 실행한다. Direct REST Pipeline의
 
 ---
 
+## Chat Pipeline
+
+VS 2022 채팅 UI에서 사용자 자연어 입력을 받아 의도 분석 → 도구 자동 선택 → 실행한다. (contracts.md §9, §10)
+
+```
+1. [사용자 (외부)] 채팅 메시지 입력
+   │
+   ▼
+2. [VS Extension] 현재 에디터 코드 + 언어 + 선택 영역 정보 수집
+   │  선택 영역 없이 코드 수정 요청 시 → "현재 파일 전체를 포함할까요?" 확인
+   │
+   ▼
+3. [VS Extension] → [MCP Server] POST /api/chat (ChatRequest)
+   │
+   ▼
+4. [MCP Server / IntentResolver] 의도 분석
+   │  → 프롬프트 로드 (intent_analysis.prompt.md)
+   │  → {{message}}, {{tools}}, {{language}} 변수 치환
+   │  → [LLM Connector] 의도 분석 프롬프트 전송
+   │  ← JSON 파싱: {toolName, confidence, description}
+   │
+   ├─ toolName != null (confidence ≥ 0.5)
+   │  ▼
+   │  5a. [MCP Server] → [Tool Registry] ToolCallRequest
+   │      │  (기존 Tool Call Flow §4b 재활용)
+   │      ▼
+   │  6a. 코드 수정 도구 → ChatResponse (result + codeChange, requiresApproval=true)
+   │      비수정 도구 → ChatResponse (result only, requiresApproval=false)
+   │
+   └─ toolName == null (confidence < 0.5)
+      ▼
+      5b. [MCP Server / IntentResolver] 일반 대화 응답 생성
+          │  → 프롬프트 로드 (general_chat.prompt.md)
+          │  → {{message}}, {{code}}, {{language}}, {{history}} 변수 치환
+          │  → [LLM Connector] 일반 대화 프롬프트 전송
+          ▼
+      6b. ChatResponse (result only, requiresApproval=false)
+   │
+   ▼
+7. [VS Extension] ChatResponse 수신 → 채팅 메시지로 표시 (Markdown 렌더링)
+   │
+   ├─ requiresApproval == true
+   │  → side-by-side diff 뷰로 코드 변경 표시
+   │  → "✅ 승인" / "❌ 거부" 인라인 버튼 표시
+   │  → 승인 시: 에디터에 코드 적용
+   │            선택 영역 모드(SelectionOnly) → 원본 텍스트를 문서에서 찾아 해당 부분만 교체
+   │            전체 파일 모드 → ITextBuffer.CreateEdit로 전체 교체 (Undo 스택 자동 등록)
+   │            + POST /api/chat/approve (approved=true)
+   │  → 거부 시: POST /api/chat/approve (approved=false)
+   │
+   └─ requiresApproval == false
+      → 결과만 표시
+```
+
+- 대화 이력은 서버 ConversationStore에 저장되며 LLM 컨텍스트에 포함된다.
+- conversationId로 대화 세션을 식별한다 (null이면 새 대화 생성).
+- ConversationTimeoutMinutes (기본 30분) 경과 시 서버가 자동 정리한다.
+
+---
+
+## Chat Session Backup/Restore Flow
+
+VS Extension 내 코드 정규화 및 세션 백업 흐름.
+
+```
+새 대화 시작 또는 이전 대화 선택 시:
+  1. [VS Extension] 현재 대화에 사용자 메시지가 있으면 BackupCurrentSession() 호출
+     → 메시지 목록 스냅샷 (UI 참조 제외) + conversationId + 첫 사용자 메시지를 제목으로 저장
+     → 동일 conversationId 기존 백업이 있으면 갱신, 없으면 새로 추가
+     → 최대 20개 유지 (FIFO)
+  2. 이력 ComboBox 갱신 ([HH:mm] 제목 형식)
+
+이전 대화 복원 시:
+  1. [VS Extension] BackupCurrentSession() → 현재 대화 저장
+  2. RestoreSession(session) → 선택된 세션의 메시지 재렌더링
+     → 승인/거부 상태가 있는 메시지는 버튼 비활성화
+     → conversationId 복원으로 서버 측 대화 이어가기 가능
+```
+
+코드 적용 시 정규화 흐름:
+
+```
+1. NormalizeNewlines(코드, snapshot) → 문서의 줄바꿈 형식(\r\n / \n) 감지 → 일괄 변환
+2. NormalizeIndentation(코드, snapshot) → 문서의 들여쓰기 형식(탭/스페이스) 감지
+   → LLM 출력과 문서 형식이 다르면 변환 (문서의 줄바꿈 형식에 맞춰 join)
+3. SelectionOnly 모드 → 원본 텍스트를 문서에서 IndexOf로 찾아 해당 부분만 Replace
+   전체 파일 모드 → 전체 Replace
+```
+
+---
+
 ## Startup Sequence
 
 ```

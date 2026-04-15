@@ -41,6 +41,10 @@ builder.Services.AddSingleton<ToolRegistryService>(sp =>
     return registry;
 });
 
+// --- Chat 모듈 (contracts.md §9, §10) ---
+builder.Services.AddSingleton<IConversationStore, InMemoryConversationStore>();
+builder.Services.AddSingleton<IntentResolver>();
+
 var app = builder.Build();
 
 // --- Startup: Ollama 연결 확인 ---

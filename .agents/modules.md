@@ -8,13 +8,16 @@
 
 ## 1. MCP Server
 
-- **책임**: MCP 프로토콜 준수, VS 2022 Agent mode 요청 수신, 메서드 라우팅, 응답 반환
+- **책임**: MCP 프로토콜 준수, VS 2022 Agent mode 요청 수신, 메서드 라우팅, 응답 반환, **채팅 의도 분석 및 대화 관리**
 - **입력**: MCP 클라이언트 요청 (JSON-RPC) — 클라이언트는 VS 2022 Agent mode 또는 REST 클라이언트
 - **출력**: MCP 프로토콜 응답 (JSON-RPC) 또는 REST JSON 응답
-- **의존**: Tool Registry, Configuration
-- **비의존**: LLM Connector (직접 호출하지 않음), Resource Cache (직접 접근하지 않음)
+- **의존**: Tool Registry, Configuration, **LLM Connector (의도 분석 전용 — 라우팅 결정 목적)**
+- **비의존**: Resource Cache (직접 접근하지 않음)
 - **동기 REST**: `GET /api/tools/list`, `POST /api/tools/call` — SSE 세션 없이 직접 도구 실행. 오프라인 CLI 호출용.
-- **구현**: `McpServer/McpEndpoints.cs` — SSE 전송 방식 (`GET /sse`, `POST /message`) + 동기 REST 엔드포인트, JSON 직렬화는 `JsonSerializerOptions`(camelCase) 사용
+- **Chat REST**: `POST /api/chat`, `POST /api/chat/approve` — 채팅 기반 의도 분석 + 도구 자동 실행 (contracts.md §9, §10)
+- **IntentResolver**: 사용자 메시지를 분석하여 적절한 도구를 선택한다. LLM Connector를 직접 호출하되, 이는 "도구 실행"이 아닌 "라우팅 결정"이다.
+- **ConversationStore**: 대화 상태를 메모리 내 관리. 대화 이력을 LLM 컨텍스트에 포함. 향후 SQLite 등 경량 DB 마이그레이션 가능하도록 인터페이스 분리.
+- **구현**: `McpServer/McpEndpoints.cs` — SSE + REST + Chat 엔드포인트, `McpServer/IntentResolver.cs`, `McpServer/ConversationStore.cs`
 
 ## 2. Tool Registry
 
@@ -62,16 +65,19 @@
 
 ## 6. VS Extension (VSIX)
 
-- **책임**: VS 2022 내 Tool Window UI 제공, 현재 편집 파일/선택 영역 코드 획득, MCP Server REST API 호출, 결과 표시
-- **입력**: 사용자 버튼 클릭 (현재 파일, 선택 영역) + 도구 선택 (서버에서 동적 로드)
-- **출력**: Tool Window에 Markdown 렌더링된 결과 표시 (FlowDocument)
-- **의존**: MCP Server (REST API — contracts.md §8: GET /api/tools/list + POST /api/tools/call)
+- **책임**: VS 2022 내 **채팅 기반 Tool Window UI** 제공, 현재 편집 파일/선택 영역 코드 획득, MCP Server Chat API 호출, 대화 이력 표시, 코드 변경 승인/거부
+- **입력**: 사용자 채팅 메시지 입력 (자연어) + 현재 에디터 코드 컨텍스트 (자동 첨부)
+- **출력**: 채팅 메시지 목록 (Markdown 렌더링, 대화 이력) + 코드 변경 side-by-side diff 뷰
+- **의존**: MCP Server (REST API — contracts.md §8, §9, §10: tools/list, tools/call, chat, chat/approve)
 - **비의존**: Tool Registry, LLM Connector, Resource Cache, Configuration (모두 서버 측)
 - **제약**: VS 2022 17.14+ 전용, .NET Framework 4.8, 오프라인 환경에서도 동작 (서버가 로컬이므로)
 - **VS 테마**: VsBrushes + VSColorTheme 기반 Dark/Light/Blue 자동 대응
 - **Markdown 렌더링**: Markdig AST → WPF FlowDocument 변환 (헤딩, 리스트, 코드블록, 볼드/이탤릭, 인용)
-- **동적 도구 로딩**: 시작 시 GET /api/tools/list로 서버 도구 목록 조회 → ComboBox에 표시. 서버에 도구 추가 시 VSIX 재설치 불필요.
-- **코드 적용 기능**: 코드 수정 도구(add_comments, refactor_current_code, fix_code_issues) 실행 결과를 "📋 적용" 버튼으로 에디터에 반영. 선택 영역이 있으면 선택 영역만, 없으면 전체 파일을 교체한다. LLM 응답에서 마지막 코드 펜스 블록을 추출하여 순수 코드만 적용한다.
+- **채팅 UI**: 사용자 메시지(우측) / 봇 응답(좌측) 대화 형태. Enter 전송, Shift+Enter 줄바꿈.
+- **코드 변경 승인**: 코드 수정 도구 결과를 side-by-side diff로 표시. 사용자 승인(✅) 시 에디터에 적용, 거부(❌) 시 미적용. VS Undo 스택으로 자동 백업.
+- **코드 적용 모드**: 선택 영역 모드(SelectionOnly)일 때 원본 텍스트를 문서에서 찾아 해당 부분만 교체. 전체 파일 모드일 때 전체 교체.
+- **대화 세션 백업**: 새 대화 시작 또는 이전 대화 복원 시 현재 대화를 자동 백업. 최대 20개 세션 유지. 첫 번째 사용자 메시지를 제목으로 표시.
+- **코드 컨텍스트 확인**: 선택 영역 없이 코드 수정 요청 시 "현재 파일 전체를 포함할까요?" 확인 후 진행.
 - **구현**: `src/LocalMcpVsExtension/` — VSIX 프로젝트 (Community.VisualStudio.Toolkit.17, Markdig)
 - **빌드 주의**: SDK-style csproj에서 `<Import Project="Sdk.props" />` / `<Import Project="Sdk.targets" />` 를 명시적으로 분리하고 VsSDK.targets를 Sdk.targets 뒤에 import해야 pkgdef 생성과 VSIX 패키징이 동작한다. VS 2022 MSBuild로 빌드한다.
 

@@ -10,6 +10,7 @@ public sealed class ServerConfig
     public ServerSection Server { get; set; } = new();
     public LlmSection Llm { get; set; } = new();
     public ToolsSection Tools { get; set; } = new();
+    public ChatSection Chat { get; set; } = new();
 }
 
 public sealed class ServerSection
@@ -31,4 +32,11 @@ public sealed class ToolsSection
 {
     public string Directory { get; set; } = "tools";
     public string PromptsDirectory { get; set; } = "prompts";
+}
+
+public sealed class ChatSection
+{
+    public string? IntentModel { get; set; }
+    public int ConversationTimeoutMinutes { get; set; } = 30;
+    public int MaxConversationHistory { get; set; } = 20;
 }

@@ -9,7 +9,7 @@
 - **LLM 런타임**: Ollama (`/api/chat` 엔드포인트)
 - **기본 모델**: qwen2.5-coder:7b
 - **접속 방식**: SSE (VS 2022 Agent mode) 또는 Direct REST API (오프라인 CLI)
-- **상태**: 4개 도구 구현 (summarize·add_comments·refactor·fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v1.1 (테마·마크다운·동적도구·코드적용)
+- **상태**: 4개 도구 구현 (summarize·add_comments·refactor·fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v2.0 (채팅 UI·의도 분석·자동 도구 선택·승인 흐름·side-by-side diff)
 - **비목표**: GitHub Copilot 대체
 
 ## 구성
@@ -21,7 +21,7 @@
 | LLM Connector | 로컬 LLM과의 통신 추상화 |
 | Resource Cache | 현장 필수 자료(문서, 표준, 참조)의 로컬 조회 |
 | Configuration | 서버·모델·도구·캐시 설정 중앙 관리 |
-| VS Extension (VSIX) | VS 2022 Tool Window에서 코드 요약 UI 제공 |
+| VS Extension (VSIX) | VS 2022 Tool Window에서 채팅 기반 코딩 보조 UI 제공 |
 
 ## 요구사항
 
@@ -153,7 +153,9 @@ src/LocalMcpServer/
   ToolRegistry/RefactorCurrentCodeTool.cs   — refactor_current_code 구현
   ToolRegistry/FixCodeIssuesTool.cs         — fix_code_issues 구현
   ToolRegistry/PromptTemplateLoader.cs — 프롬프트 템플릿 로더
-  McpServer/McpEndpoints.cs         — MCP SSE + Direct REST 엔드포인트
+  McpServer/McpEndpoints.cs         — MCP SSE + Direct REST + Chat 엔드포인트
+  McpServer/IntentResolver.cs       — 의도 분석 (메시지→도구 매핑)
+  McpServer/ConversationStore.cs    — 대화 상태 관리 (인메모리)
   prompts/                          — 프롬프트 템플릿 파일 (코드 수정 없이 튜닝 가능)
   appsettings.json                  — 서버 설정
 
@@ -165,9 +167,10 @@ src/LocalMcpVsExtension/
   LocalMcpVsExtensionPackage.cs     — VS 패키지 진입점
   Commands/ShowSummaryWindowCommand.cs — Tool Window 열기 커맨드
   ToolWindows/SummaryToolWindow.cs  — Tool Window 정의
-  ToolWindows/SummaryToolWindowControl.cs — WPF UI (프로그래밍 방식)
-  Services/McpRestClient.cs         — MCP Server REST 클라이언트
+  ToolWindows/SummaryToolWindowControl.cs — 채팅 UI (프로그래밍 방식)
+  Services/McpRestClient.cs         — MCP Server REST 클라이언트 (Chat API 포함)
   Services/LanguageDetector.cs      — 파일 확장자 → 언어 매핑
+  Services/ChatMessageViewModel.cs  — 채팅 메시지 뷰 모델
 .vs/mcp.json                        — VS 2022 MCP 연결 설정
 ```
 
@@ -180,20 +183,24 @@ src/LocalMcpVsExtension/
 | 환경 | 접속 방법 | 엔드포인트 | 비고 |
 |------|-----------|-----------|------|
 | 온라인 | VS 2022 Agent mode (SSE) | `GET /sse` + `POST /message` | Copilot 확장 필요 |
-| 오프라인 | VS 2022 확장 (VSIX) | `POST /api/tools/call` | IDE 통합 Tool Window |
+| 오프라인 | VS 2022 확장 (VSIX) | `POST /api/chat` | IDE 통합 채팅 UI |
 | 오프라인 | CLI / 스크립트 (REST) | `GET /api/tools/list` + `POST /api/tools/call` | IDE 무관 |
 
 두 방식 모두 동일한 MCP 서버 프로세스를 공유하며, 같은 도구와 LLM 커넥터를 사용한다.
 
 ## VS 2022 확장 (VSIX) — 오프라인 IDE 통합
 
-인터넷이 없는 환경에서 VS 2022 안에서 직접 코드 요약을 사용할 수 있는 Tool Window 확장이다.
+인터넷이 없는 환경에서 VS 2022 안에서 채팅 형태로 코딩 보조를 사용할 수 있는 Tool Window 확장이다.
 
-**v1.1 주요 기능:**
+**v2.0 주요 기능:**
+- **채팅 UI**: 자연어로 요청하면 서버가 의도를 분석하고 적절한 도구를 자동 선택·실행
+- **의도 분석**: LLM이 사용자 메시지를 분석하여 summarize/add_comments/refactor/fix 중 적절한 도구를 선택
+- **승인 흐름**: 코드 수정 결과를 side-by-side diff로 표시, 사용자 확인 후에만 에디터에 반영
+- **선택 영역 지원**: 선택 영역만 보냈을 때 해당 부분만 교체, 전체 파일일 때 전체 교체
+- **대화 이력**: 같은 대화 안에서 컨텍스트를 유지하며 후속 요청 가능
+- **대화 세션 백업**: 새 대화 시작 시 현재 대화를 자동 저장, 필요 시 이전 대화를 복원하여 참고 가능 (최대 20개)
 - VS Dark/Light/Blue 테마 자동 대응 (VsBrushes + VSColorTheme)
 - LLM 응답을 Markdown으로 렌더링 (헤딩, 리스트, 코드블록, 볼드 등)
-- 서버 도구 목록을 동적으로 로드하여 ComboBox에 표시 — 서버에 도구 추가 시 VSIX 재설치 불필요
-- 코드 수정 도구(add_comments, refactor, fix) 결과를 "📋 적용" 버튼으로 에디터에 즉시 반영
 
 ### 빌드
 
@@ -216,13 +223,73 @@ Visual Studio 2022 MSBuild를 사용한다:
 
 1. **MCP 서버 실행**: `cd src/LocalMcpServer && dotnet run`
 2. **Tool Window 열기**: VS 메뉴 → **보기 → 다른 창 → Local MCP 코드 요약**
-3. 도구 창이 열리면 서버에서 **도구 목록이 자동으로 로드**된다 (↻ 버튼으로 새로고침 가능)
-4. **현재 파일**: 편집기에서 파일을 열고 "현재 파일" 버튼 클릭
-5. **선택 영역**: 코드를 선택한 상태에서 "선택 영역" 버튼 클릭
-6. 결과가 **Markdown으로 렌더링**되어 Tool Window에 표시된다
-7. 코드 수정 도구 실행 후 **"📋 적용" 버튼**을 클릭하면 결과 코드가 에디터에 반영된다 (선택 영역 또는 전체 파일)
+3. 채팅 입력란에 자연어로 요청을 입력한다. 예:
+   - "이 코드를 요약해줘"
+   - "주석을 추가해줘"
+   - "리팩터링 해줘"
+   - "버그가 있는지 확인해줘"
+4. **"현재 코드 포함" 체크박스**: 체크하면 에디터의 현재 파일/선택 영역을 자동 첨부
+5. 서버가 의도를 분석하고 적절한 도구를 **자동 선택**하여 실행한다
+6. 결과가 **Markdown으로 렌더링**되어 채팅 버블에 표시된다
+7. 코드 수정이 포함된 경우 **side-by-side diff**로 원본/변경 코드가 표시된다
+8. **"✅ 확인" 버튼**을 클릭하면 변경이 에디터에 반영된다 (Ctrl+Z로 되돌리기 가능)
+9. **"❌ 거부" 버튼**을 클릭하면 변경을 취소한다
+10. **📋 버튼**으로 이전 대화 목록을 표시하고, 선택하여 복원할 수 있다
 
-서버 주소는 Tool Window 상단의 URL 필드에서 변경 가능하다 (기본: `http://localhost:5100`).
+서버 주소는 ⚙ 버튼을 클릭하여 변경할 수 있다 (기본: `http://localhost:5100`).
+
+## Chat API 레퍼런스
+
+VSIX 채팅 UI가 사용하는 API이다. CLI에서도 직접 호출 가능하다.
+
+### `POST /api/chat`
+
+자연어 메시지를 보내면 서버가 의도를 분석하고 적절한 도구를 실행한다.
+
+**요청 바디:**
+
+```json
+{
+  "message": "이 코드에 주석을 추가해줘",
+  "code": "public class Foo { ... }",
+  "language": "csharp",
+  "selectionOnly": false,
+  "conversationId": null
+}
+```
+
+**응답:**
+
+```json
+{
+  "conversationId": "abc-123",
+  "intent": {
+    "toolName": "add_comments",
+    "confidence": 0.95,
+    "description": "코드에 문서 주석을 추가합니다"
+  },
+  "result": "주석이 추가된 코드입니다:\n```csharp\n...\n```",
+  "codeChange": {
+    "original": "public class Foo { ... }",
+    "modified": "/// <summary>...</summary>\npublic class Foo { ... }",
+    "toolName": "add_comments"
+  },
+  "requiresApproval": true
+}
+```
+
+### `POST /api/chat/approve`
+
+코드 변경을 승인하거나 거부한다.
+
+**요청 바디:**
+
+```json
+{
+  "conversationId": "abc-123",
+  "approved": true
+}
+```
 
 ## Direct REST API 레퍼런스
 
