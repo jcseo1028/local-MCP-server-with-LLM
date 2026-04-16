@@ -1,6 +1,7 @@
 using LocalMcpServer.Configuration;
 using LocalMcpServer.LlmConnector;
 using LocalMcpServer.McpServer;
+using LocalMcpServer.ResourceCache;
 using LocalMcpServer.ToolRegistry;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 
@@ -31,6 +32,8 @@ builder.Services.AddSingleton<SummarizeCurrentCodeTool>();
 builder.Services.AddSingleton<AddCommentsTool>();
 builder.Services.AddSingleton<RefactorCurrentCodeTool>();
 builder.Services.AddSingleton<FixCodeIssuesTool>();
+builder.Services.AddSingleton<SearchProjectCodeTool>();
+builder.Services.AddSingleton<SuggestFixFromErrorLogTool>();
 builder.Services.AddSingleton<ToolRegistryService>(sp =>
 {
     var registry = new ToolRegistryService();
@@ -38,6 +41,8 @@ builder.Services.AddSingleton<ToolRegistryService>(sp =>
     registry.Register(sp.GetRequiredService<AddCommentsTool>());
     registry.Register(sp.GetRequiredService<RefactorCurrentCodeTool>());
     registry.Register(sp.GetRequiredService<FixCodeIssuesTool>());
+    registry.Register(sp.GetRequiredService<SearchProjectCodeTool>());
+    registry.Register(sp.GetRequiredService<SuggestFixFromErrorLogTool>());
     return registry;
 });
 
@@ -49,10 +54,19 @@ builder.Services.AddSingleton<IntentResolver>();
 builder.Services.AddSingleton<DocumentSearcher>();
 builder.Services.AddSingleton<RunOrchestrator>();
 
+// --- Resource Cache 모듈 (contracts.md §4, modules.md §4) ---
+builder.Services.AddSingleton<ResourceCacheService>();
+builder.Services.AddSingleton<IResourceCache>(sp => sp.GetRequiredService<ResourceCacheService>());
+
 var app = builder.Build();
 
 // --- Startup: Ollama 연결 확인 ---
 var logger = app.Services.GetRequiredService<ILogger<Program>>();
+
+// Resource Cache 초기화 (시작 시 인덱스 구축)
+var resourceCache = app.Services.GetRequiredService<ResourceCacheService>();
+resourceCache.Initialize();
+
 var ollama = app.Services.GetRequiredService<OllamaConnector>();
 var healthy = await ollama.CheckHealthAsync();
 if (healthy)

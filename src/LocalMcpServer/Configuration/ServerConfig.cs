@@ -11,6 +11,8 @@ public sealed class ServerConfig
     public LlmSection Llm { get; set; } = new();
     public ToolsSection Tools { get; set; } = new();
     public ChatSection Chat { get; set; } = new();
+    public CacheSection Cache { get; set; } = new();
+    public CodeIndexSection CodeIndex { get; set; } = new();
     public DocumentSearchSection DocumentSearch { get; set; } = new();
     public BuildSection Build { get; set; } = new();
 }
@@ -53,4 +55,17 @@ public sealed class BuildSection
 {
     public bool OfflineMode { get; set; } = true;
     public string? SolutionPath { get; set; }
+}
+
+public sealed class CacheSection
+{
+    public string Directory { get; set; } = "";
+    public string[] Categories { get; set; } = [];
+}
+
+public sealed class CodeIndexSection
+{
+    public string RootPath { get; set; } = "";
+    public string[] FilePatterns { get; set; } = ["*.cs", "*.xaml"];
+    public string Strategy { get; set; } = "hybrid";
 }

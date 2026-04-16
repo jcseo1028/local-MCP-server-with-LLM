@@ -1,3 +1,4 @@
+using LocalMcpServer.ResourceCache;
 using LocalMcpServer.ToolRegistry;
 
 namespace LocalMcpServer.McpServer;
@@ -13,6 +14,7 @@ public sealed class RunOrchestrator
     private readonly IntentResolver _intent;
     private readonly DocumentSearcher _docSearcher;
     private readonly ToolRegistryService _registry;
+    private readonly IResourceCache _cache;
     private readonly ILogger<RunOrchestrator> _logger;
 
     public RunOrchestrator(
@@ -20,12 +22,14 @@ public sealed class RunOrchestrator
         IntentResolver intent,
         DocumentSearcher docSearcher,
         ToolRegistryService registry,
+        IResourceCache cache,
         ILogger<RunOrchestrator> logger)
     {
         _store = store;
         _intent = intent;
         _docSearcher = docSearcher;
         _registry = registry;
+        _cache = cache;
         _logger = logger;
     }
 
@@ -49,6 +53,12 @@ public sealed class RunOrchestrator
         };
 
         _store.AddRun(run);
+
+        // SolutionPath가 있고 현재 인덱스 루트와 다르면 백그라운드 재인덱싱
+        if (!string.IsNullOrEmpty(req.SolutionPath))
+        {
+            _ = _cache.ReindexAsync(req.SolutionPath);
+        }
 
         _ = Task.Run(() => ExecutePipelineAsync(run));
 

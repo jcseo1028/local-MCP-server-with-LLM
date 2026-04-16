@@ -9,7 +9,7 @@
 - **LLM 런타임**: Ollama (`/api/chat` 엔드포인트)
 - **기본 모델**: qwen2.5-coder:7b
 - **접속 방식**: SSE (VS 2022 Agent mode) 또는 Direct REST API (오프라인 CLI)
-- **상태**: 4개 도구 구현 (summarize·add_comments·refactor·fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v2.0 (채팅 UI·의도 분석·자동 도구 선택·승인 흐름·side-by-side diff) · **v2.1 구현 완료** (다단계 오케스트레이션·계획수립·문서검색·빌드/테스트·결과요약·단계별 UI) · Resource Cache 미구현
+- **상태**: 6개 도구 구현 (summarize·add_comments·refactor·fix·search_project_code·suggest_fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v2.0 (채팅 UI·의도 분석·자동 도구 선택·승인 흐름·side-by-side diff) · **v2.1 구현 완료** (다단계 오케스트레이션·계획수립·문서검색·빌드/테스트·결과요약·단계별 UI) · Resource Cache 구현 완료
 - **비목표**: GitHub Copilot 대체
 
 ## 구성
@@ -99,8 +99,8 @@ Invoke-RestMethod http://localhost:5100/api/tools/call -Method POST `
 | `add_comments` | 코드에 문서 주석(XML doc, JSDoc 등) + 인라인 주석 자동 추가 | ✅ 구현 완료 |
 | `refactor_current_code` | 가독성·구조·현대적 표현 기반 코드 리팩터링 | ✅ 구현 완료 |
 | `fix_code_issues` | 버그·안티패턴·보안 취약점 탐지 및 수정 | ✅ 구현 완료 |
-| `search_project_code` | 프로젝트 내 코드 검색 | 🔲 미구현 (Resource Cache 선행 필요) |
-| `suggest_fix_from_error_log` | 에러 로그 기반 수정 제안 | 🔲 미구현 |
+| `search_project_code` | 프로젝트 내 코드 검색 | ✅ 구현 완료 (Resource Cache 필요) |
+| `suggest_fix_from_error_log` | 에러 로그 기반 수정 제안 | ✅ 구현 완료 |
 
 #### v2.1 오케스트레이션 내부 서비스
 
@@ -116,7 +116,7 @@ Invoke-RestMethod http://localhost:5100/api/tools/call -Method POST `
 
 | 모듈 | 설명 | 상태 |
 |------|------|------|
-| Resource Cache | 현장 필수 자료 로컬 저장·조회 + 프로젝트 코드 인덱스 | 🔲 다음 단계 |
+| Resource Cache | 현장 필수 자료 로컬 저장·조회 + 프로젝트 코드 인덱스 | ✅ 구현 완료 |
 
 ## VS 2022 MCP 연결 설정 (SSE)
 
@@ -167,13 +167,18 @@ src/LocalMcpServer/
   ToolRegistry/AddCommentsTool.cs           — add_comments 구현
   ToolRegistry/RefactorCurrentCodeTool.cs   — refactor_current_code 구현
   ToolRegistry/FixCodeIssuesTool.cs         — fix_code_issues 구현
+  ToolRegistry/SearchProjectCodeTool.cs     — search_project_code 구현 (Resource Cache)
+  ToolRegistry/SuggestFixFromErrorLogTool.cs — suggest_fix_from_error_log 구현
   ToolRegistry/PromptTemplateLoader.cs — 프롬프트 템플릿 로더
   McpServer/McpEndpoints.cs         — MCP SSE + Direct REST + Chat + Run 엔드포인트
   McpServer/IntentResolver.cs       — 의도 분석 + 계획 수립 + 요약 생성
   McpServer/ConversationStore.cs    — 대화 + Run 상태 관리 (인메모리)
   McpServer/RunOrchestrator.cs      — 9단계 Run 상태 머신 (v2.1)
   McpServer/RunModels.cs            — Run 상태 모델 + API DTO (v2.1)
-  McpServer/DocumentSearcher.cs     — 로컬 문서 검색 (v2.1)
+  McpServer/DocumentSearcher.cs     — 로컬 문서 검색 + Resource Cache 통합 (v2.1)
+  ResourceCache/IResourceCache.cs   — Resource Cache 인터페이스
+  ResourceCache/CacheModels.cs      — 캐시 요청/응답 모델 (contracts.md §4)
+  ResourceCache/ResourceCacheService.cs — 문서 캐시 + 코드 인덱스 (심볼 추출 + 텍스트 역인덱스)
   prompts/                          — 프롬프트 템플릿 파일 (코드 수정 없이 튜닝 가능)
   appsettings.json                  — 서버 설정
 

@@ -360,6 +360,7 @@ namespace LocalMcpVsExtension.ToolWindows
                 _txtStatus.Text = "Run 시작 중...";
 
                 // Run 시작
+                var solutionPath = await GetSolutionPathAsync();
                 var startReq = new RunStartRequest
                 {
                     Message = message,
@@ -367,7 +368,8 @@ namespace LocalMcpVsExtension.ToolWindows
                     Language = language,
                     SelectionOnly = selectionOnly,
                     ConversationId = _conversationId,
-                    ActiveFilePath = activeFilePath
+                    ActiveFilePath = activeFilePath,
+                    SolutionPath = solutionPath
                 };
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();

@@ -57,7 +57,11 @@
   2. 전문 텍스트 검색: 키워드 기반 역인덱스로 전체 텍스트 검색을 지원한다.
   3. 색인 범위는 Config.codeIndex.filePatterns로 제어한다.
   4. 향후 필요 시 AST 파싱(Roslyn 등)으로 업그레이드 가능한다.
-- **구현**: 미구현 — 다음 단계에서 구현 예정
+- **구현**: `ResourceCache/` — IResourceCache, ResourceCacheService, CacheModels. 시작 시 캐시 디렉터리 로드 + 코드 인덱스 구축. 정규식 기반 심볼 추출 + 텍스트 역인덱스.
+- **혼합형 코드 인덱스**: VSIX SolutionPath 우선, Config.CodeIndex.RootPath 폴백.
+  - VSIX Run 시작 시 SolutionPath를 서버에 전송 → `ReindexAsync`로 동적 재인덱싱
+  - `ReaderWriterLockSlim`으로 검색/재인덱싱 간 스레드 안전성 확보
+  - 같은 루트 경로면 재인덱싱 스킵
 
 ## 5. Configuration
 
