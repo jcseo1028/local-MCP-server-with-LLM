@@ -21,7 +21,7 @@ var config = builder.Configuration.Get<ServerConfig>() ?? new ServerConfig();
 // --- LLM Connector 모듈 ---
 builder.Services.AddHttpClient<OllamaConnector>(client =>
 {
-    client.Timeout = TimeSpan.FromMinutes(5); // 로컬 LLM 추론은 100초 이상 걸릴 수 있음
+    client.Timeout = TimeSpan.FromMinutes(10); // 로컬 7B 모델은 긴 코드에서 수 분 소요될 수 있음
 });
 
 // --- Tool Registry 모듈 ---

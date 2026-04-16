@@ -29,6 +29,7 @@ public sealed class LlmSection
     public string Provider { get; set; } = "ollama";
     public string Endpoint { get; set; } = "http://localhost:11434";
     public string DefaultModel { get; set; } = "qwen2.5-coder:7b";
+    public string? GeneralModel { get; set; }
     public string? SummaryModel { get; set; }
 }
 

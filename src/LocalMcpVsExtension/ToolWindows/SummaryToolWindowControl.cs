@@ -26,9 +26,9 @@ namespace LocalMcpVsExtension.ToolWindows
         private readonly McpRestClient _client = new McpRestClient();
         private readonly BuildTestRunner _buildRunner = new BuildTestRunner();
         private readonly List<ChatMessageViewModel> _messages = new List<ChatMessageViewModel>();
-        private string _conversationId;
-        private string _currentRunId;
-        private CancellationTokenSource _pollCts;
+        private string? _conversationId;
+        private string? _currentRunId;
+        private CancellationTokenSource? _pollCts;
         private bool _isBusy;
 
         // ── UI 요소 ──────────────────────────────────────────
@@ -230,7 +230,7 @@ namespace LocalMcpVsExtension.ToolWindows
             return tb;
         }
 
-        private Button CreateButton(string content, string tooltip = null)
+        private Button CreateButton(string content, string? tooltip = null)
         {
             var btn = new Button
             {
@@ -267,7 +267,7 @@ namespace LocalMcpVsExtension.ToolWindows
         {
             BackupCurrentSession();
 
-            _conversationId = null;
+            _conversationId = null!;
             _messages.Clear();
             _chatPanel.Children.Clear();
             AddSystemMessage("새로운 대화를 시작합니다.");
@@ -317,14 +317,14 @@ namespace LocalMcpVsExtension.ToolWindows
             _txtInput.Text = "";
             SetBusy(true);
 
-            AddUserMessage(message);
+            AddUserMessage(message!);
 
             try
             {
-                string code = null;
-                string language = null;
+                string? code = null;
+                string? language = null;
                 bool selectionOnly = false;
-                string activeFilePath = null;
+                string? activeFilePath = null;
 
                 if (_chkIncludeCode.IsChecked == true)
                 {
@@ -363,11 +363,11 @@ namespace LocalMcpVsExtension.ToolWindows
                 var solutionPath = await GetSolutionPathAsync();
                 var startReq = new RunStartRequest
                 {
-                    Message = message,
+                    Message = message!,
                     Code = code,
                     Language = language,
                     SelectionOnly = selectionOnly,
-                    ConversationId = _conversationId,
+                    ConversationId = _conversationId ?? "",
                     ActiveFilePath = activeFilePath,
                     SolutionPath = solutionPath
                 };
@@ -463,9 +463,21 @@ namespace LocalMcpVsExtension.ToolWindows
                         sw.Stop();
 
                         // 최종 결과 표시
-                        var content = snapshot.FinalSummary ?? snapshot.Proposal?.Summary ?? "(결과 없음)";
+                        string content;
                         if (!string.IsNullOrEmpty(snapshot.Error))
+                        {
                             content = "오류: " + snapshot.Error;
+                        }
+                        else if (snapshot.Proposal != null && !snapshot.Proposal.RequiresApproval
+                                 && !string.IsNullOrEmpty(snapshot.Proposal.Summary))
+                        {
+                            // 승인 불필요(요약/채팅)인 경우: Proposal.Summary가 핵심 결과
+                            content = snapshot.Proposal.Summary;
+                        }
+                        else
+                        {
+                            content = snapshot.FinalSummary ?? snapshot.Proposal?.Summary ?? "(결과 없음)";
+                        }
 
                         UpdateRunContent(runVm, content, snapshot);
                         _txtStatus.Text = string.Format("{0} ({1:F1}초)", snapshot.State, sw.Elapsed.TotalSeconds);
@@ -820,9 +832,28 @@ namespace LocalMcpVsExtension.ToolWindows
                 modifiedCode = NormalizeNewlines(modifiedCode, snapshot);
                 modifiedCode = NormalizeIndentation(modifiedCode, snapshot);
 
+                // 적용 전 기본 검증: 잘린 코드 보호
+                var originalCode = msg.CodeChange.SelectionOnly
+                    ? msg.CodeChange.Original
+                    : snapshot.GetText();
+                if (!string.IsNullOrEmpty(originalCode) && !string.IsNullOrEmpty(modifiedCode))
+                {
+                    // 수정 코드가 원본의 30% 미만이면 LLM 출력이 잘렸을 가능성이 높음
+                    var ratio = (double)modifiedCode.Length / originalCode.Length;
+                    if (ratio < 0.3)
+                    {
+                        _txtStatus.Text = $"적용 중단: 수정 코드가 원본 대비 너무 짧습니다 ({ratio:P0}). LLM 출력이 잘렸을 수 있습니다.";
+                        msg.Approval = ApprovalState.Rejected;
+                        UpdateApprovalUI(msg);
+                        var serverUrl2 = _txtServerUrl.Text.TrimEnd('/');
+                        await _client.SendRunApprovalAsync(serverUrl2, msg.RunId, false);
+                        return;
+                    }
+                }
+
                 // §8g: 적용 실패 분기 — 원본 매칭 실패 시 build_test Skipped
                 var applyFailed = false;
-                string applyErrorMsg = null;
+                string? applyErrorMsg = null;
 
                 try
                 {
@@ -889,7 +920,7 @@ namespace LocalMcpVsExtension.ToolWindows
                     var solutionPath = await GetSolutionPathAsync();
                     if (!string.IsNullOrEmpty(solutionPath))
                     {
-                        var buildResult = await _buildRunner.BuildAsync(solutionPath);
+                        var buildResult = await _buildRunner.BuildAsync(solutionPath!);
                         clientResult.Build = new ClientBuildResult
                         {
                             Attempted = buildResult.Attempted,
@@ -899,7 +930,7 @@ namespace LocalMcpVsExtension.ToolWindows
 
                         if (buildResult.Succeeded == true)
                         {
-                            var testResult = await _buildRunner.TestAsync(solutionPath);
+                            var testResult = await _buildRunner.TestAsync(solutionPath!);
                             clientResult.Tests = new ClientTestResult
                             {
                                 Attempted = testResult.Attempted,
@@ -943,7 +974,7 @@ namespace LocalMcpVsExtension.ToolWindows
             _txtStatus.Text = "변경이 거부되었습니다.";
         }
 
-        private async Task<string> GetSolutionPathAsync()
+        private async Task<string?> GetSolutionPathAsync()
         {
             try
             {
@@ -1457,7 +1488,7 @@ namespace LocalMcpVsExtension.ToolWindows
 
             var session = new ChatSession
             {
-                ConversationId = _conversationId,
+                ConversationId = _conversationId ?? "",
                 Title = title,
                 CreatedAt = _messages.FirstOrDefault()?.Timestamp ?? DateTime.Now,
                 Messages = snapshot

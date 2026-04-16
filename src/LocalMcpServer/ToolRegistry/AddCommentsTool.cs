@@ -28,8 +28,8 @@ public sealed class AddCommentsTool : CodeToolBase
 
     protected override LlmOptions GetLlmOptions() => new()
     {
-        Temperature = 0.2,  // 주석은 정확성이 중요하므로 낮은 temperature
-        MaxTokens = 2048,   // 주석 추가 시 코드 길이가 늘어남
-        NumCtx = 4096
+        Temperature = 0.2,
+        MaxTokens = 4096,   // 주석 추가 시 코드 길이가 늘어남
+        NumCtx = 8192
     };
 }

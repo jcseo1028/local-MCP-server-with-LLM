@@ -145,7 +145,7 @@ namespace LocalMcpVsExtension.Services
     /// <summary>과거 대화 세션 백업</summary>
     internal sealed class ChatSession
     {
-        public string ConversationId { get; set; }
+        public string ConversationId { get; set; } = "";
         public string Title { get; set; } = "";
         public DateTime CreatedAt { get; set; } = DateTime.Now;
         public List<ChatMessageViewModel> Messages { get; set; } = new List<ChatMessageViewModel>();

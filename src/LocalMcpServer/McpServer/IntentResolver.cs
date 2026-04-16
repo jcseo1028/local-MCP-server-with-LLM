@@ -64,7 +64,7 @@ public sealed class IntentResolver
 
             var intentModel = !string.IsNullOrEmpty(_config.Chat.IntentModel)
                 ? _config.Chat.IntentModel
-                : null; // null이면 OllamaConnector가 defaultModel 사용
+                : _config.Llm.GeneralModel; // GeneralModel 우선, null이면 OllamaConnector가 defaultModel 사용
 
             var llmRequest = new LlmRequest
             {
@@ -109,9 +109,12 @@ public sealed class IntentResolver
             ["history"] = history
         }, ct);
 
+        var generalModel = _config.Llm.GeneralModel;
+
         var llmRequest = new LlmRequest
         {
             Prompt = prompt,
+            Model = generalModel,
             Options = new LlmOptions
             {
                 Temperature = 0.5,
@@ -140,13 +143,13 @@ public sealed class IntentResolver
                 ["message"] = message,
                 ["intent_tool"] = intent.ToolName ?? "general_chat",
                 ["intent_description"] = intent.Description,
-                ["code"] = code ?? "(코드 없음)",
                 ["language"] = language ?? "unknown"
             }, ct);
 
             var llmRequest = new LlmRequest
             {
                 Prompt = prompt,
+                Model = _config.Llm.GeneralModel,
                 Options = new LlmOptions
                 {
                     Temperature = 0.2,
@@ -186,6 +189,7 @@ public sealed class IntentResolver
             var llmRequest = new LlmRequest
             {
                 Prompt = prompt,
+                Model = _config.Llm.GeneralModel,
                 Options = new LlmOptions
                 {
                     Temperature = 0.3,

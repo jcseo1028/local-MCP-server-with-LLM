@@ -59,7 +59,8 @@ Tool Registry가 도구 실행 중 LLM 호출이 필요할 때 사용한다.
 
 ```
 1. [Tool Registry] → [LLM Connector] LLMRequest 전달
-   │  model 필드로 기본/보조 모델 선택
+   │  model 필드로 코드/일반/보조 모델 선택
+   │  (코드 도구 → DefaultModel, 의도분석·계획·대화·요약 → GeneralModel)
    ▼
 2. [LLM Connector] 프롬프트 포맷팅 및 옵션 적용
    │
@@ -263,12 +264,12 @@ Chat Pipeline을 다단계 오케스트레이션으로 확장한다. (contracts.
    │
    ├─ 4a. intent_analysis (의도분석)
    │      → IntentResolver (기존 의도 분석 + build/test 필요 여부 추론)
-   │      → LLM Connector (로컬 전용)
+   │      → LLM Connector (로컬 전용, GeneralModel 사용)
    │      ← {toolName, confidence, description, needsBuildTest}
    │
    ├─ 4b. planning (계획수립)
    │      → IntentResolver.GeneratePlan()
-   │      → LLM Connector (로컬 전용)
+   │      → LLM Connector (로컬 전용, GeneralModel 사용)
    │      ← planItems (최대 5개)
    │
    ├─ 4c. context_collection (컨텍스트수집)
@@ -280,8 +281,8 @@ Chat Pipeline을 다단계 오케스트레이션으로 확장한다. (contracts.
    │      → 문서 없으면 Skipped 처리
    │
    ├─ 4e. proposal_generation (수정안생성)
-   │      ├─ toolName != null → [Tool Registry] ToolCallRequest (기존 Tool Call Flow 재활용)
-   │      └─ toolName == null → [LLM Connector] 일반 대화 응답 생성
+   │      ├─ toolName != null → [Tool Registry] ToolCallRequest (기존 Tool Call Flow 재활용, 코드 도구는 DefaultModel)
+   │      └─ toolName == null → [LLM Connector] 일반 대화 응답 생성 (GeneralModel)
    │      → 코드 수정 도구이면 proposal.requiresApproval=true
    │
    ▼

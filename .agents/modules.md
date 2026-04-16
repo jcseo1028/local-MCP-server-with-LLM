@@ -42,7 +42,7 @@
 - **의존**: Configuration
 - **외부 의존**: 로컬 LLM 엔드포인트 (권장: Ollama)
 - **제약**: 오프라인 환경 전용. 원격 LLM 엔드포인트를 사용하지 않는다.
-- **다중 모델**: 기본 모델(추론용)과 보조 모델(요약용)을 Config 기반으로 선택한다. 모델 선택 시 `string.IsNullOrEmpty` 검증으로 빈 문자열도 fallback 처리한다.
+- **다중 모델**: 코드 모델(`DefaultModel`, 코드 변환용)과 일반 모델(`GeneralModel`, 의도 분석·계획·대화·요약용)을 Config 기반으로 선택한다. 호출자가 `LlmRequest.Model`에 적절한 모델을 명시하고, null이면 `SummaryModel → DefaultModel` 순으로 폴백한다. 모델 선택 시 `string.IsNullOrEmpty` 검증으로 빈 문자열도 fallback 처리한다.
 - **구현**: `LlmConnector/` — OllamaConnector (`/api/chat` 엔드포인트), LlmModels
 
 ## 4. Resource Cache

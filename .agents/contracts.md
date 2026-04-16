@@ -149,8 +149,9 @@ Config {
   llm: {
     provider: string      // 로컬 LLM 제공자 식별자 (권장: "ollama")
     endpoint: string      // 로컬 LLM 엔드포인트 URL
-    defaultModel: string  // 기본 모델명 (추론용, 권장: Qwen 계열)
-    summaryModel: string | null  // 보조 요약 모델명 (선택, 권장: Gemma 계열, null이면 defaultModel 사용)
+    defaultModel: string  // 코드 태스크 모델명 (권장: Qwen 계열)
+    generalModel: string | null  // 일반 태스크 모델명 (선택, 권장: Gemma 계열, null이면 defaultModel 사용)
+    summaryModel: string | null  // 보조 요약 모델명 (선택, null이면 generalModel → defaultModel 사용)
   }
   tools: {
     directory: string     // 도구 정의 디렉터리 경로

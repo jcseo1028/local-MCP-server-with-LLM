@@ -122,7 +122,7 @@ public sealed class RunOrchestrator
         try
         {
             run.State = RunState.Running;
-            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
             var ct = cts.Token;
 
             // 1. 의도 분석
@@ -194,6 +194,19 @@ public sealed class RunOrchestrator
             // 승인 불필요한 경우 나머지 진행
             await ExecutePostApprovalAsync(run);
         }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("Run {RunId} 취소됨 (타임아웃 또는 서버 종료)", run.RunId);
+            run.State = RunState.Failed;
+            run.Error = "작업이 취소되었습니다. LLM 응답 시간이 초과되었거나 서버가 종료되었습니다.";
+
+            // 진행 중인 단계를 실패로 전환
+            foreach (var stage in run.Stages)
+            {
+                if (stage.Status == StageStatus.InProgress)
+                    stage.Fail("취소됨");
+            }
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Run {RunId} 파이프라인 오류", run.RunId);
@@ -236,6 +249,12 @@ public sealed class RunOrchestrator
 
             // 9. 최종 요약
             await GenerateFinalSummaryAsync(run);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("Run {RunId} 후처리 취소됨", run.RunId);
+            run.State = RunState.Failed;
+            run.Error = "후처리 중 취소되었습니다.";
         }
         catch (Exception ex)
         {
@@ -315,6 +334,19 @@ public sealed class RunOrchestrator
         var s9 = run.GetStage(StageIds.FinalSummary);
         s9.Start();
 
+        // 승인 불필요(요약/채팅)인 경우: Proposal.Summary가 이미 최종 결과
+        // 별도 LLM 요약 호출 없이 바로 사용하여 시간과 리소스 절약
+        if (run.Proposal is { RequiresApproval: false } && !string.IsNullOrEmpty(run.Proposal.Summary))
+        {
+            run.FinalSummary = run.Proposal.Summary;
+            s9.Complete("요약 완료");
+
+            var conv = _store.Get(run.ConversationId);
+            conv?.AddMessage("assistant", run.FinalSummary);
+            run.State = RunState.Completed;
+            return;
+        }
+
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
@@ -344,8 +376,10 @@ public sealed class RunOrchestrator
 
     private static string? ExtractCodeFromResult(string result)
     {
+        // 1. 코드 펜스 블록에서 마지막(가장 큰) 코드 블록 추출
         var lastFenceStart = -1;
         var lastFenceEnd = -1;
+        var largestLen = 0;
         var searchFrom = 0;
 
         while (true)
@@ -360,13 +394,40 @@ public sealed class RunOrchestrator
             var end = result.IndexOf("```", contentStart, StringComparison.Ordinal);
             if (end < 0) break;
 
-            lastFenceStart = contentStart;
-            lastFenceEnd = end;
+            // 가장 큰 코드 블록을 선택 (설명 코드 스니펫이 아닌 전체 코드 블록)
+            var blockLen = end - contentStart;
+            if (blockLen > largestLen)
+            {
+                largestLen = blockLen;
+                lastFenceStart = contentStart;
+                lastFenceEnd = end;
+            }
             searchFrom = end + 3;
         }
 
         if (lastFenceStart >= 0 && lastFenceEnd > lastFenceStart)
             return result[lastFenceStart..lastFenceEnd].TrimEnd();
+
+        // 2. 코드 펜스가 없는 경우: 설명 텍스트가 앞에 있으면 코드 부분만 추출 시도
+        // "### " 또는 "##" 헤딩 이후 코드가 시작되는 패턴 감지
+        var lines = result.Split('\n');
+        var lastHeadingEnd = -1;
+        for (int i = lines.Length - 1; i >= 0; i--)
+        {
+            if (lines[i].TrimStart().StartsWith("###") || lines[i].TrimStart().StartsWith("##"))
+            {
+                lastHeadingEnd = i + 1;
+                break;
+            }
+        }
+
+        if (lastHeadingEnd > 0 && lastHeadingEnd < lines.Length)
+        {
+            var codeLines = lines[lastHeadingEnd..];
+            var codeText = string.Join('\n', codeLines).Trim();
+            if (codeText.Length > 0)
+                return codeText;
+        }
 
         return null;
     }
