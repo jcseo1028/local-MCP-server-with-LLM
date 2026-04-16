@@ -6,8 +6,8 @@ using LocalMcpServer.ToolRegistry;
 namespace LocalMcpServer.McpServer;
 
 /// <summary>
-/// MCP 프로토콜(JSON-RPC 2.0) SSE 전송 방식 서버 + 동기 REST API.
-/// contracts.md §1, §2, §8 준수.
+/// MCP 프로토콜(JSON-RPC 2.0) SSE 전송 방식 서버 + 동기 REST API + Run API.
+/// contracts.md §1, §2, §8, §11 준수.
 /// 
 /// SSE 엔드포인트 (VS 2022 Agent mode):
 ///   GET  /sse         → 클라이언트가 SSE 스트림에 연결
@@ -16,6 +16,12 @@ namespace LocalMcpServer.McpServer;
 /// Direct REST 엔드포인트 (오프라인 CLI):
 ///   GET  /api/tools/list → 도구 목록 조회
 ///   POST /api/tools/call → 도구 직접 실행
+/// 
+/// Run API 엔드포인트 (v2.1 오케스트레이션):
+///   POST /api/chat/runs            → Run 시작
+///   GET  /api/chat/runs/{runId}    → Run 상태 폴링
+///   POST /api/chat/runs/{runId}/approval      → 승인/거부
+///   POST /api/chat/runs/{runId}/client-result  → 빌드/테스트 결과 수신
 /// </summary>
 public static class McpEndpoints
 {
@@ -335,6 +341,142 @@ public static class McpEndpoints
                 return Results.Json(new { success = false, message = ex.Message }, s_jsonOptions);
             }
         });
+
+        // --- Run API 엔드포인트 (contracts.md §11) ---
+
+        // Run 시작
+        app.MapPost("/api/chat/runs", (HttpContext ctx, RunOrchestrator orchestrator) =>
+        {
+            var logger = ctx.RequestServices.GetRequiredService<ILogger<RunOrchestrator>>();
+
+            try
+            {
+                using var reader = new StreamReader(ctx.Request.Body);
+                var body = reader.ReadToEndAsync().GetAwaiter().GetResult();
+                var request = JsonSerializer.Deserialize<ChatRunStartRequest>(body, s_jsonOptions);
+
+                if (request is null || string.IsNullOrWhiteSpace(request.Message))
+                    return Results.BadRequest(new { error = "message is required" });
+
+                var run = orchestrator.StartRun(request);
+
+                logger.LogInformation("Run 시작: {RunId}, message={Msg}", run.RunId,
+                    run.Message.Length > 50 ? run.Message[..50] + "..." : run.Message);
+
+                return Results.Json(new
+                {
+                    runId = run.RunId,
+                    conversationId = run.ConversationId,
+                    state = run.State.ToString()
+                }, s_jsonOptions);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Run 시작 오류");
+                return Results.Json(new { error = ex.Message }, s_jsonOptions, statusCode: 500);
+            }
+        });
+
+        // Run 상태 조회 (폴링)
+        app.MapGet("/api/chat/runs/{runId}", (string runId, IConversationStore store) =>
+        {
+            var run = store.GetRun(runId);
+            if (run is null)
+                return Results.NotFound(new { error = "Run not found" });
+
+            return Results.Json(BuildRunSnapshot(run), s_jsonOptions);
+        });
+
+        // Run 승인/거부
+        app.MapPost("/api/chat/runs/{runId}/approval", async (HttpContext ctx, string runId,
+            IConversationStore store, RunOrchestrator orchestrator) =>
+        {
+            var logger = ctx.RequestServices.GetRequiredService<ILogger<RunOrchestrator>>();
+
+            var run = store.GetRun(runId);
+            if (run is null)
+                return Results.NotFound(new { error = "Run not found" });
+
+            if (run.State != RunState.WaitingForApproval)
+                return Results.BadRequest(new { error = $"Run is not waiting for approval (state={run.State})" });
+
+            using var reader = new StreamReader(ctx.Request.Body);
+            var body = await reader.ReadToEndAsync();
+            var request = JsonSerializer.Deserialize<JsonElement>(body);
+            var approved = request.GetProperty("approved").GetBoolean();
+
+            logger.LogInformation("Run {RunId} 승인 처리: approved={Approved}", runId, approved);
+            orchestrator.ProcessApproval(run, approved);
+
+            return Results.Json(BuildRunSnapshot(run), s_jsonOptions);
+        });
+
+        // 클라이언트 빌드/테스트 결과 수신
+        app.MapPost("/api/chat/runs/{runId}/client-result", async (HttpContext ctx, string runId,
+            IConversationStore store, RunOrchestrator orchestrator) =>
+        {
+            var logger = ctx.RequestServices.GetRequiredService<ILogger<RunOrchestrator>>();
+
+            var run = store.GetRun(runId);
+            if (run is null)
+                return Results.NotFound(new { error = "Run not found" });
+
+            using var reader = new StreamReader(ctx.Request.Body);
+            var body = await reader.ReadToEndAsync();
+            var request = JsonSerializer.Deserialize<ChatRunClientResultRequest>(body, s_jsonOptions);
+
+            if (request is null)
+                return Results.BadRequest(new { error = "Invalid request body" });
+
+            logger.LogInformation("Run {RunId} 클라이언트 결과 수신: build={Build}, tests={Tests}",
+                runId, request.Build.Attempted, request.Tests.Attempted);
+
+            await orchestrator.ProcessClientResultAsync(run, request);
+
+            return Results.Json(BuildRunSnapshot(run), s_jsonOptions);
+        });
+    }
+
+    private static object BuildRunSnapshot(RunData run)
+    {
+        return new
+        {
+            runId = run.RunId,
+            conversationId = run.ConversationId,
+            state = run.State.ToString(),
+            createdAt = run.CreatedAt,
+            stages = run.Stages.Select(s => new
+            {
+                stageId = s.StageId,
+                title = s.Title,
+                status = s.Status.ToString(),
+                message = s.Message,
+                startedAt = s.StartedAt,
+                completedAt = s.CompletedAt
+            }).ToArray(),
+            intent = run.Intent is not null ? new
+            {
+                toolName = run.Intent.ToolName,
+                confidence = run.Intent.Confidence,
+                description = run.Intent.Description
+            } : null,
+            planItems = run.PlanItems,
+            references = run.References.Select(r => new
+            {
+                title = r.Title,
+                source = r.Source,
+                excerpt = r.Excerpt
+            }).ToArray(),
+            proposal = run.Proposal is not null ? new
+            {
+                summary = run.Proposal.Summary,
+                original = run.Proposal.Original,
+                modified = run.Proposal.Modified,
+                requiresApproval = run.Proposal.RequiresApproval
+            } : null,
+            finalSummary = run.FinalSummary,
+            error = run.Error
+        };
     }
 
     /// <summary>

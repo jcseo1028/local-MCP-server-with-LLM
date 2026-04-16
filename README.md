@@ -9,7 +9,7 @@
 - **LLM 런타임**: Ollama (`/api/chat` 엔드포인트)
 - **기본 모델**: qwen2.5-coder:7b
 - **접속 방식**: SSE (VS 2022 Agent mode) 또는 Direct REST API (오프라인 CLI)
-- **상태**: 4개 도구 구현 (summarize·add_comments·refactor·fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v2.0 (채팅 UI·의도 분석·자동 도구 선택·승인 흐름·side-by-side diff)
+- **상태**: 4개 도구 구현 (summarize·add_comments·refactor·fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v2.0 (채팅 UI·의도 분석·자동 도구 선택·승인 흐름·side-by-side diff) · **v2.1 구현 완료** (다단계 오케스트레이션·계획수립·문서검색·빌드/테스트·결과요약·단계별 UI) · Resource Cache 미구현
 - **비목표**: GitHub Copilot 대체
 
 ## 구성
@@ -99,9 +99,24 @@ Invoke-RestMethod http://localhost:5100/api/tools/call -Method POST `
 | `add_comments` | 코드에 문서 주석(XML doc, JSDoc 등) + 인라인 주석 자동 추가 | ✅ 구현 완료 |
 | `refactor_current_code` | 가독성·구조·현대적 표현 기반 코드 리팩터링 | ✅ 구현 완료 |
 | `fix_code_issues` | 버그·안티패턴·보안 취약점 탐지 및 수정 | ✅ 구현 완료 |
-| `search_project_code` | 프로젝트 내 코드 검색 | 🔲 미구현 |
+| `search_project_code` | 프로젝트 내 코드 검색 | 🔲 미구현 (Resource Cache 선행 필요) |
 | `suggest_fix_from_error_log` | 에러 로그 기반 수정 제안 | 🔲 미구현 |
-| `ask_local_docs` | 현장 문서 질의응답 | 🔲 미구현 |
+
+#### v2.1 오케스트레이션 내부 서비스
+
+| 도구/서비스 | 설명 | 소유 모듈 | 상태 |
+|------------|------|-----------|------|
+| `RunOrchestrator` | Run 단위 9단계 상태 머신 관리 + 컨텍스트 검증(32KB) | MCP Server | ✅ 구현 완료 |
+| `IntentResolver.GeneratePlan()` | 의도 분석 후 2~5개 작업 계획 수립 | MCP Server | ✅ 구현 완료 |
+| `DocumentSearcher` | 로컬 문서 폴더 내 규칙/참조 문서 검색 | MCP Server | ✅ 구현 완료 |
+| `BuildTestRunner` | 오프라인 빌드(--no-restore) + 단위 테스트 실행 | VS Extension | ✅ 구현 완료 |
+| `SummaryGenerator` | 전체 run 결과를 종합한 최종 요약 생성 | MCP Server | ✅ 구현 완료 |
+
+#### 미구현 모듈
+
+| 모듈 | 설명 | 상태 |
+|------|------|------|
+| Resource Cache | 현장 필수 자료 로컬 저장·조회 + 프로젝트 코드 인덱스 | 🔲 다음 단계 |
 
 ## VS 2022 MCP 연결 설정 (SSE)
 
@@ -153,9 +168,12 @@ src/LocalMcpServer/
   ToolRegistry/RefactorCurrentCodeTool.cs   — refactor_current_code 구현
   ToolRegistry/FixCodeIssuesTool.cs         — fix_code_issues 구현
   ToolRegistry/PromptTemplateLoader.cs — 프롬프트 템플릿 로더
-  McpServer/McpEndpoints.cs         — MCP SSE + Direct REST + Chat 엔드포인트
-  McpServer/IntentResolver.cs       — 의도 분석 (메시지→도구 매핑)
-  McpServer/ConversationStore.cs    — 대화 상태 관리 (인메모리)
+  McpServer/McpEndpoints.cs         — MCP SSE + Direct REST + Chat + Run 엔드포인트
+  McpServer/IntentResolver.cs       — 의도 분석 + 계획 수립 + 요약 생성
+  McpServer/ConversationStore.cs    — 대화 + Run 상태 관리 (인메모리)
+  McpServer/RunOrchestrator.cs      — 9단계 Run 상태 머신 (v2.1)
+  McpServer/RunModels.cs            — Run 상태 모델 + API DTO (v2.1)
+  McpServer/DocumentSearcher.cs     — 로컬 문서 검색 (v2.1)
   prompts/                          — 프롬프트 템플릿 파일 (코드 수정 없이 튜닝 가능)
   appsettings.json                  — 서버 설정
 
@@ -167,10 +185,11 @@ src/LocalMcpVsExtension/
   LocalMcpVsExtensionPackage.cs     — VS 패키지 진입점
   Commands/ShowSummaryWindowCommand.cs — Tool Window 열기 커맨드
   ToolWindows/SummaryToolWindow.cs  — Tool Window 정의
-  ToolWindows/SummaryToolWindowControl.cs — 채팅 UI (프로그래밍 방식)
-  Services/McpRestClient.cs         — MCP Server REST 클라이언트 (Chat API 포함)
+  ToolWindows/SummaryToolWindowControl.cs — 채팅 UI + Run 타임라인 + 빌드/테스트 실행
+  Services/McpRestClient.cs         — MCP Server REST 클라이언트 (Chat + Run API)
   Services/LanguageDetector.cs      — 파일 확장자 → 언어 매핑
-  Services/ChatMessageViewModel.cs  — 채팅 메시지 뷰 모델
+  Services/ChatMessageViewModel.cs  — 채팅/Run 뷰 모델 (ChatRunViewModel 등)
+  Services/BuildTestRunner.cs       — 오프라인 빌드/테스트 실행기 (v2.1)
 .vs/mcp.json                        — VS 2022 MCP 연결 설정
 ```
 
@@ -183,7 +202,7 @@ src/LocalMcpVsExtension/
 | 환경 | 접속 방법 | 엔드포인트 | 비고 |
 |------|-----------|-----------|------|
 | 온라인 | VS 2022 Agent mode (SSE) | `GET /sse` + `POST /message` | Copilot 확장 필요 |
-| 오프라인 | VS 2022 확장 (VSIX) | `POST /api/chat` | IDE 통합 채팅 UI |
+| 오프라인 | VS 2022 확장 (VSIX) | `POST /api/chat/runs` | IDE 통합 채팅 UI (v2.1 Run) |
 | 오프라인 | CLI / 스크립트 (REST) | `GET /api/tools/list` + `POST /api/tools/call` | IDE 무관 |
 
 두 방식 모두 동일한 MCP 서버 프로세스를 공유하며, 같은 도구와 LLM 커넥터를 사용한다.
@@ -201,6 +220,24 @@ src/LocalMcpVsExtension/
 - **대화 세션 백업**: 새 대화 시작 시 현재 대화를 자동 저장, 필요 시 이전 대화를 복원하여 참고 가능 (최대 20개)
 - VS Dark/Light/Blue 테마 자동 대응 (VsBrushes + VSColorTheme)
 - LLM 응답을 Markdown으로 렌더링 (헤딩, 리스트, 코드블록, 볼드 등)
+
+**v2.1 추가 기능:**
+- **9단계 오케스트레이션**: 의도분석 → 계획수립 → 컨텍스트수집 → 문서검색 → 수정안생성 → 승인 → 적용 → 빌드/테스트 → 결과요약
+- **단계별 타임라인 UI**: 각 단계의 진행 상태를 색상으로 구분하여 실시간 표시 (Completed=초록, InProgress=파랑, Failed=빨강)
+- **계획/참조 섹션**: Run 카드에 포함된 계획 항목과 참조 문서를 섹션 카드로 표시
+- **컨텍스트 검증**: 코드 32KB 초과 시 자동 절단, 적용 실패 시 build/test 자동 생략
+- **오프라인 빌드/테스트**: --no-restore 빌드 + 네트워크 무관 단위 테스트 자동 실행
+- **최종 요약**: 의도·계획·수정·빌드 결과를 LLM이 종합 요약
+- **로컬 문서 검색**: 설정된 로컬 폴더에서 규칙/참조 문서 키워드 검색
+
+**v2.1 추가 기능:**
+- **9단계 오케스트레이션**: 의도분석 → 계획수립 → 컨텍스트수집 → 문서검색 → 수정안생성 → 승인 → 적용 → 빌드/테스트 → 결과요약
+- **단계별 타임라인 UI**: 각 단계의 진행 상태를 색상으로 구분하여 실시간 표시 (Completed=초록, InProgress=파랑, Failed=빨강)
+- **계획/참조 섹션**: Run 카드에 포함된 계획 항목과 참조 문서를 섹션 카드로 표시
+- **컨텍스트 검증**: 코드 32KB 초과 시 자동 절단, 적용 실패 시 build/test 자동 생략
+- **오프라인 빌드/테스트**: --no-restore 빌드 + 네트워크 무관 단위 테스트 자동 실행
+- **최종 요약**: 의도·계획·수정·빌드 결과를 LLM이 종합 요약
+- **로컬 문서 검색**: 설정된 로컬 폴더에서 규칙/참조 문서 키워드 검색 (기존 ask_local_docs 기능 대체)
 
 ### 빌드
 

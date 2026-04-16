@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -23,8 +24,11 @@ namespace LocalMcpVsExtension.ToolWindows
     public sealed class SummaryToolWindowControl : UserControl
     {
         private readonly McpRestClient _client = new McpRestClient();
+        private readonly BuildTestRunner _buildRunner = new BuildTestRunner();
         private readonly List<ChatMessageViewModel> _messages = new List<ChatMessageViewModel>();
         private string _conversationId;
+        private string _currentRunId;
+        private CancellationTokenSource _pollCts;
         private bool _isBusy;
 
         // ── UI 요소 ──────────────────────────────────────────
@@ -320,12 +324,14 @@ namespace LocalMcpVsExtension.ToolWindows
                 string code = null;
                 string language = null;
                 bool selectionOnly = false;
+                string activeFilePath = null;
 
                 if (_chkIncludeCode.IsChecked == true)
                 {
                     var docView = await VS.Documents.GetActiveDocumentViewAsync();
                     if (docView?.TextBuffer != null)
                     {
+                        activeFilePath = docView.FilePath;
                         var selection = docView.TextView?.Selection;
                         if (selection != null && selection.SelectedSpans.Count > 0)
                         {
@@ -351,51 +357,39 @@ namespace LocalMcpVsExtension.ToolWindows
                 }
 
                 var serverUrl = _txtServerUrl.Text.TrimEnd('/');
-                _txtStatus.Text = "처리 중...";
+                _txtStatus.Text = "Run 시작 중...";
 
-                var waitingVm = AddAssistantMessage("처리 중입니다. 모델 크기에 따라 10~60초 소요될 수 있습니다...");
-
-                var chatRequest = new ChatRequest
+                // Run 시작
+                var startReq = new RunStartRequest
                 {
                     Message = message,
                     Code = code,
                     Language = language,
                     SelectionOnly = selectionOnly,
-                    ConversationId = _conversationId
+                    ConversationId = _conversationId,
+                    ActiveFilePath = activeFilePath
                 };
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var response = await _client.SendChatAsync(serverUrl, chatRequest);
-                sw.Stop();
+                var startResp = await _client.StartRunAsync(serverUrl, startReq);
+                _conversationId = startResp.ConversationId;
+                _currentRunId = startResp.RunId;
 
-                RemoveMessage(waitingVm);
-
-                _conversationId = response.ConversationId;
-
-                var resultVm = new ChatMessageViewModel
+                // Run 진행 상태 표시용 메시지
+                var runVm = new ChatMessageViewModel
                 {
                     Role = ChatMessageRole.Assistant,
-                    Content = response.Result ?? "(응답 없음)",
-                    IntentSummary = response.Intent?.Description
+                    Content = "처리 중...",
+                    RunId = startResp.RunId,
+                    RunViewModel = new ChatRunViewModel { RunId = startResp.RunId }
                 };
+                _messages.Add(runVm);
+                RenderMessage(runVm);
 
-                if (response.RequiresApproval && response.CodeChange != null)
-                {
-                    resultVm.HasCodeChange = true;
-                    resultVm.CodeChange = new CodeChangeInfo
-                    {
-                        Original = response.CodeChange.Original ?? "",
-                        Modified = response.CodeChange.Modified ?? "",
-                        ToolName = response.CodeChange.ToolName ?? "",
-                        SelectionOnly = selectionOnly
-                    };
-                    resultVm.Approval = ApprovalState.Pending;
-                }
-
-                _messages.Add(resultVm);
-                RenderMessage(resultVm);
-
-                _txtStatus.Text = string.Format("완료 ({0:F1}초) @ {1:HH:mm:ss}", sw.Elapsed.TotalSeconds, DateTime.Now);
+                // 폴링으로 상태 추적
+                _pollCts?.Cancel();
+                _pollCts = new CancellationTokenSource();
+                await PollRunAsync(serverUrl, startResp.RunId, runVm, selectionOnly, sw, _pollCts.Token);
             }
             catch (System.Net.Http.HttpRequestException ex)
             {
@@ -405,31 +399,413 @@ namespace LocalMcpVsExtension.ToolWindows
                     "  cd src/LocalMcpServer && dotnet run\n\n" +
                     "오류: " + ex.Message);
                 _txtStatus.Text = "연결 실패";
+                SetBusy(false);
             }
             catch (TaskCanceledException)
             {
                 AddAssistantMessage("요청 시간이 초과되었습니다.\nOllama가 실행 중인지 확인하세요.");
                 _txtStatus.Text = "시간 초과";
+                SetBusy(false);
             }
             catch (Exception ex)
             {
                 AddAssistantMessage("오류가 발생했습니다:\n" + ex.Message);
                 _txtStatus.Text = "오류";
-            }
-            finally
-            {
                 SetBusy(false);
             }
         }
 
-        // ── 확인/거부 처리 ───────────────────────────────────────
-
-        private async Task ApproveChangeAsync(ChatMessageViewModel msg)
+        private async Task PollRunAsync(string serverUrl, string runId,
+            ChatMessageViewModel runVm, bool selectionOnly,
+            System.Diagnostics.Stopwatch sw, CancellationToken ct)
         {
-            if (msg.CodeChange == null || _conversationId == null) return;
+            try
+            {
+                while (!ct.IsCancellationRequested)
+                {
+                    await Task.Delay(750, ct);
+
+                    var snapshot = await _client.GetRunAsync(serverUrl, runId);
+                    if (runVm.RunViewModel != null)
+                        runVm.RunViewModel.UpdateFrom(snapshot);
+
+                    // 단계 진행 상태를 표시
+                    UpdateRunStageDisplay(runVm, snapshot);
+
+                    if (snapshot.State == "WaitingForApproval")
+                    {
+                        _txtStatus.Text = string.Format("승인 대기 중 ({0:F1}초)", sw.Elapsed.TotalSeconds);
+
+                        if (snapshot.Proposal != null && snapshot.Proposal.RequiresApproval)
+                        {
+                            runVm.HasCodeChange = true;
+                            runVm.CodeChange = new CodeChangeInfo
+                            {
+                                Original = snapshot.Proposal.Original ?? "",
+                                Modified = snapshot.Proposal.Modified ?? "",
+                                ToolName = snapshot.Intent?.ToolName ?? "",
+                                SelectionOnly = selectionOnly
+                            };
+                            runVm.Approval = ApprovalState.Pending;
+
+                            // UI 업데이트: diff + 승인 버튼 추가
+                            RenderRunApproval(runVm, snapshot);
+                        }
+
+                        SetBusy(false);
+                        return; // 폴링 중단, 사용자 승인 대기
+                    }
+
+                    if (snapshot.State == "Completed" || snapshot.State == "Rejected" || snapshot.State == "Failed")
+                    {
+                        sw.Stop();
+
+                        // 최종 결과 표시
+                        var content = snapshot.FinalSummary ?? snapshot.Proposal?.Summary ?? "(결과 없음)";
+                        if (!string.IsNullOrEmpty(snapshot.Error))
+                            content = "오류: " + snapshot.Error;
+
+                        UpdateRunContent(runVm, content, snapshot);
+                        _txtStatus.Text = string.Format("{0} ({1:F1}초)", snapshot.State, sw.Elapsed.TotalSeconds);
+                        SetBusy(false);
+                        return;
+                    }
+
+                    // Running 상태 업데이트
+                    var activeStage = snapshot.Stages?.FirstOrDefault(
+                        s => s.Status == "InProgress");
+                    _txtStatus.Text = activeStage != null
+                        ? string.Format("{0}... ({1:F1}초)", activeStage.Title, sw.Elapsed.TotalSeconds)
+                        : string.Format("처리 중... ({0:F1}초)", sw.Elapsed.TotalSeconds);
+                }
+            }
+            catch (TaskCanceledException) { }
+            catch (Exception ex)
+            {
+                AddAssistantMessage("폴링 오류: " + ex.Message);
+                _txtStatus.Text = "오류";
+                SetBusy(false);
+            }
+        }
+
+        private void UpdateRunStageDisplay(ChatMessageViewModel runVm, RunSnapshot snapshot)
+        {
+            if (!(runVm.Tag is Border border && border.Child is StackPanel panel))
+                return;
+
+            var (fg, bg) = GetThemeColors();
+            bool isDark = IsDark(bg);
+
+            // ── 단계 타임라인 (§9b 색상 구분) ──
+            var timelinePanel = panel.Children.OfType<StackPanel>()
+                .FirstOrDefault(p => p.Name == "StageTimeline");
+
+            if (timelinePanel == null)
+            {
+                timelinePanel = new StackPanel
+                {
+                    Name = "StageTimeline",
+                    Margin = new Thickness(0, 4, 0, 4)
+                };
+                // 맨 앞에 삽입
+                if (panel.Children.Count > 0)
+                    panel.Children.Insert(0, timelinePanel);
+                else
+                    panel.Children.Add(timelinePanel);
+            }
+
+            timelinePanel.Children.Clear();
+
+            if (snapshot.Stages != null)
+            {
+                foreach (var stage in snapshot.Stages)
+                {
+                    var stagePanel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 1, 0, 1) };
+
+                    string icon;
+                    Color iconColor;
+                    switch (stage.Status)
+                    {
+                        case "Completed":
+                            icon = "\u2705";
+                            iconColor = isDark ? Color.FromRgb(78, 201, 176) : Color.FromRgb(22, 163, 74);
+                            break;
+                        case "InProgress":
+                            icon = "\u23F3";
+                            iconColor = isDark ? Color.FromRgb(86, 156, 214) : Color.FromRgb(37, 99, 235);
+                            break;
+                        case "Skipped":
+                            icon = "\u23ED";
+                            iconColor = isDark ? Color.FromRgb(128, 128, 128) : Color.FromRgb(156, 163, 175);
+                            break;
+                        case "Failed":
+                            icon = "\u274C";
+                            iconColor = isDark ? Color.FromRgb(244, 63, 94) : Color.FromRgb(220, 38, 38);
+                            break;
+                        default: // Pending
+                            icon = "\u25CB";
+                            iconColor = isDark ? Color.FromRgb(100, 100, 100) : Color.FromRgb(180, 180, 180);
+                            break;
+                    }
+
+                    var iconBlock = new TextBlock
+                    {
+                        Text = icon,
+                        FontSize = 11,
+                        Width = 18,
+                        Foreground = new SolidColorBrush(iconColor)
+                    };
+                    stagePanel.Children.Add(iconBlock);
+
+                    var titleBlock = new TextBlock
+                    {
+                        Text = stage.Title,
+                        FontSize = 11,
+                        Foreground = new SolidColorBrush(
+                            stage.Status == "Pending" ? iconColor : fg)
+                    };
+                    if (stage.Status == "Skipped")
+                        titleBlock.TextDecorations = TextDecorations.Strikethrough;
+                    stagePanel.Children.Add(titleBlock);
+
+                    if (!string.IsNullOrEmpty(stage.Message))
+                    {
+                        var msgBlock = new TextBlock
+                        {
+                            Text = " — " + stage.Message,
+                            FontSize = 10,
+                            Foreground = new SolidColorBrush(isDark
+                                ? Color.FromRgb(160, 160, 160)
+                                : Color.FromRgb(120, 120, 120)),
+                            TextTrimming = TextTrimming.CharacterEllipsis,
+                            MaxWidth = 300
+                        };
+                        stagePanel.Children.Add(msgBlock);
+                    }
+
+                    timelinePanel.Children.Add(stagePanel);
+                }
+            }
+
+            // ── 계획 섹션 (§9a) ──
+            var runVmData = runVm.RunViewModel;
+            if (runVmData != null && runVmData.PlanItems.Count > 0)
+            {
+                var planPanel = panel.Children.OfType<Border>()
+                    .FirstOrDefault(b => b.Name == "PlanSection");
+                if (planPanel == null)
+                {
+                    planPanel = CreateRunSection("PlanSection", "\uD83D\uDCCB 계획", isDark);
+                    InsertAfter(panel, timelinePanel, planPanel);
+                }
+                var planContent = planPanel.Child as StackPanel;
+                if (planContent != null && planContent.Children.Count <= 1) // title only
+                {
+                    foreach (var item in runVmData.PlanItems)
+                    {
+                        planContent.Children.Add(new TextBlock
+                        {
+                            Text = "• " + item,
+                            FontSize = 11,
+                            TextWrapping = TextWrapping.Wrap,
+                            Foreground = new SolidColorBrush(fg),
+                            Margin = new Thickness(8, 1, 0, 1)
+                        });
+                    }
+                }
+            }
+
+            // ── 참조 섹션 (§9a) ──
+            if (runVmData != null && runVmData.References.Count > 0)
+            {
+                var refPanel = panel.Children.OfType<Border>()
+                    .FirstOrDefault(b => b.Name == "RefSection");
+                if (refPanel == null)
+                {
+                    refPanel = CreateRunSection("RefSection", "\uD83D\uDD0D 참조 문서", isDark);
+                    var planSect = panel.Children.OfType<Border>()
+                        .FirstOrDefault(b => b.Name == "PlanSection");
+                    InsertAfter(panel, planSect ?? (UIElement)timelinePanel, refPanel);
+                }
+                var refContent = refPanel.Child as StackPanel;
+                if (refContent != null && refContent.Children.Count <= 1)
+                {
+                    foreach (var r in runVmData.References)
+                    {
+                        var rBlock = new TextBlock
+                        {
+                            Text = $"• {r.Title} ({r.Source})",
+                            FontSize = 10,
+                            TextWrapping = TextWrapping.Wrap,
+                            Foreground = new SolidColorBrush(fg),
+                            Margin = new Thickness(8, 1, 0, 1),
+                            TextTrimming = TextTrimming.CharacterEllipsis,
+                            MaxHeight = 30
+                        };
+                        rBlock.ToolTip = r.Excerpt;
+                        refContent.Children.Add(rBlock);
+                    }
+                }
+            }
+
+            _chatScroll.ScrollToEnd();
+        }
+
+        private Border CreateRunSection(string name, string title, bool isDark)
+        {
+            var border = new Border
+            {
+                Name = name,
+                CornerRadius = new CornerRadius(4),
+                Background = new SolidColorBrush(isDark
+                    ? Color.FromRgb(38, 38, 42)
+                    : Color.FromRgb(248, 248, 248)),
+                BorderBrush = new SolidColorBrush(isDark
+                    ? Color.FromRgb(55, 55, 60)
+                    : Color.FromRgb(220, 220, 220)),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(6, 4, 6, 4),
+                Margin = new Thickness(0, 4, 0, 2)
+            };
+
+            var panel = new StackPanel();
+            var titleBlock = new TextBlock
+            {
+                Text = title,
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 11,
+                Margin = new Thickness(0, 0, 0, 2)
+            };
+            titleBlock.SetResourceReference(TextBlock.ForegroundProperty, VsBrushes.ToolWindowTextKey);
+            panel.Children.Add(titleBlock);
+
+            border.Child = panel;
+            return border;
+        }
+
+        private static void InsertAfter(StackPanel parent, UIElement after, UIElement toInsert)
+        {
+            int idx = parent.Children.IndexOf(after);
+            if (idx >= 0 && idx < parent.Children.Count - 1)
+                parent.Children.Insert(idx + 1, toInsert);
+            else
+                parent.Children.Add(toInsert);
+        }
+
+        private void UpdateRunContent(ChatMessageViewModel runVm, string content, RunSnapshot snapshot)
+        {
+            runVm.Content = content;
+
+            if (runVm.Tag is Border border)
+            {
+                var (fg, bg) = GetThemeColors();
+                var panel = border.Child as StackPanel ?? new StackPanel();
+
+                // 기존 FlowDocumentScrollViewer를 제거하고 새로 생성
+                var toRemove = panel.Children.OfType<FlowDocumentScrollViewer>().ToList();
+                foreach (var item in toRemove)
+                    panel.Children.Remove(item);
+
+                try
+                {
+                    var flowDoc = MarkdownToFlowDocument.Convert(content, fg, bg);
+                    var docViewer = new FlowDocumentScrollViewer
+                    {
+                        Document = flowDoc,
+                        IsToolBarVisible = false,
+                        VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                        MaxHeight = 400,
+                        Background = Brushes.Transparent,
+                        BorderThickness = new Thickness(0)
+                    };
+                    panel.Children.Add(docViewer);
+                }
+                catch
+                {
+                    var plainText = new TextBlock
+                    {
+                        Text = content,
+                        TextWrapping = TextWrapping.Wrap,
+                        Foreground = new SolidColorBrush(fg)
+                    };
+                    panel.Children.Add(plainText);
+                }
+            }
+        }
+
+        private void RenderRunApproval(ChatMessageViewModel runVm, RunSnapshot snapshot)
+        {
+            if (runVm.Tag is Border border && border.Child is StackPanel panel)
+            {
+                var (fg, bg) = GetThemeColors();
+                bool isDark = IsDark(bg);
+
+                // Diff 뷰 추가
+                panel.Children.Add(CreateDiffView(runVm, fg, bg, isDark));
+                // 승인 버튼 추가 (Run API 용)
+                panel.Children.Add(CreateRunApprovalButtons(runVm));
+            }
+        }
+
+        private UIElement CreateRunApprovalButtons(ChatMessageViewModel msg)
+        {
+            var panel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 6, 0, 0)
+            };
+
+            var btnApprove = new Button
+            {
+                Content = "\u2705 확인",
+                Padding = new Thickness(10, 4, 10, 4),
+                Margin = new Thickness(0, 0, 8, 0)
+            };
+            btnApprove.SetResourceReference(Control.BackgroundProperty, VsBrushes.ButtonFaceKey);
+            btnApprove.SetResourceReference(Control.ForegroundProperty, VsBrushes.ButtonTextKey);
+            btnApprove.SetResourceReference(Control.BorderBrushProperty, VsBrushes.ActiveBorderKey);
+            btnApprove.Click += (s, e) =>
+            {
+#pragma warning disable VSSDK007
+                _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+                {
+                    await ApproveRunChangeAsync(msg);
+                });
+#pragma warning restore VSSDK007
+            };
+            panel.Children.Add(btnApprove);
+
+            var btnReject = new Button
+            {
+                Content = "\u274C 거부",
+                Padding = new Thickness(10, 4, 10, 4)
+            };
+            btnReject.SetResourceReference(Control.BackgroundProperty, VsBrushes.ButtonFaceKey);
+            btnReject.SetResourceReference(Control.ForegroundProperty, VsBrushes.ButtonTextKey);
+            btnReject.SetResourceReference(Control.BorderBrushProperty, VsBrushes.ActiveBorderKey);
+            btnReject.Click += (s, e) =>
+            {
+#pragma warning disable VSSDK007
+                _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+                {
+                    await RejectRunChangeAsync(msg);
+                });
+#pragma warning restore VSSDK007
+            };
+            panel.Children.Add(btnReject);
+
+            msg.ApprovalPanel = panel;
+            return panel;
+        }
+
+        private async Task ApproveRunChangeAsync(ChatMessageViewModel msg)
+        {
+            if (msg.CodeChange == null || msg.RunId == null) return;
 
             try
             {
+                // 에디터에 코드 적용
                 var docView = await VS.Documents.GetActiveDocumentViewAsync();
                 if (docView?.TextBuffer == null)
                 {
@@ -439,62 +815,118 @@ namespace LocalMcpVsExtension.ToolWindows
 
                 var modifiedCode = msg.CodeChange.Modified;
                 var snapshot = docView.TextBuffer.CurrentSnapshot;
-
                 modifiedCode = NormalizeNewlines(modifiedCode, snapshot);
                 modifiedCode = NormalizeIndentation(modifiedCode, snapshot);
 
-                using (var edit = docView.TextBuffer.CreateEdit())
+                // §8g: 적용 실패 분기 — 원본 매칭 실패 시 build_test Skipped
+                var applyFailed = false;
+                string applyErrorMsg = null;
+
+                try
                 {
-                    if (msg.CodeChange.SelectionOnly && !string.IsNullOrEmpty(msg.CodeChange.Original))
+                    using (var edit = docView.TextBuffer.CreateEdit())
                     {
-                        // 선택 영역 모드: 원본 텍스트를 문서에서 찾아 해당 부분만 교체
-                        var fullText = snapshot.GetText();
-                        var normalizedOriginal = NormalizeNewlines(msg.CodeChange.Original, snapshot);
-                        int idx = fullText.IndexOf(normalizedOriginal, StringComparison.Ordinal);
-                        if (idx >= 0)
+                        if (msg.CodeChange.SelectionOnly && !string.IsNullOrEmpty(msg.CodeChange.Original))
                         {
-                            edit.Replace(idx, normalizedOriginal.Length, modifiedCode);
-                        }
-                        else
-                        {
-                            // 원본을 찾지 못하면 현재 선택 영역으로 시도
-                            var sel = docView.TextView?.Selection;
-                            if (sel != null && sel.SelectedSpans.Count > 0 && !sel.SelectedSpans[0].IsEmpty)
+                            var fullText = snapshot.GetText();
+                            var normalizedOriginal = NormalizeNewlines(msg.CodeChange.Original, snapshot);
+                            int idx = fullText.IndexOf(normalizedOriginal, StringComparison.Ordinal);
+                            if (idx >= 0)
                             {
-                                var span = sel.SelectedSpans[0];
-                                edit.Replace(span.Start, span.Length, modifiedCode);
+                                edit.Replace(idx, normalizedOriginal.Length, modifiedCode);
+                                edit.Apply();
                             }
                             else
                             {
-                                edit.Replace(0, snapshot.Length, modifiedCode);
+                                applyFailed = true;
+                                applyErrorMsg = "원본 텍스트 매칭 실패: 문서가 변경되었을 수 있습니다.";
+                                // using 블록 종료 시 자동 취소
                             }
                         }
+                        else
+                        {
+                            edit.Replace(0, snapshot.Length, modifiedCode);
+                            edit.Apply();
+                        }
                     }
-                    else
-                    {
-                        // 전체 파일 모드
-                        edit.Replace(0, snapshot.Length, modifiedCode);
-                    }
-                    edit.Apply();
+                }
+                catch (Exception applyEx)
+                {
+                    applyFailed = true;
+                    applyErrorMsg = "코드 적용 중 오류: " + applyEx.Message;
                 }
 
                 msg.Approval = ApprovalState.Approved;
                 UpdateApprovalUI(msg);
 
+                // 서버에 승인 알림
                 var serverUrl = _txtServerUrl.Text.TrimEnd('/');
-                await _client.SendApprovalAsync(serverUrl, _conversationId, true);
+                await _client.SendRunApprovalAsync(serverUrl, msg.RunId, true);
 
-                _txtStatus.Text = "에디터에 적용 완료 (Ctrl+Z로 되돌리기 가능)";
+                ClientResultRequest clientResult;
+
+                if (applyFailed)
+                {
+                    // §8g: 적용 실패 시 build_test는 Skipped 처리
+                    _txtStatus.Text = "적용 실패: " + applyErrorMsg;
+                    clientResult = new ClientResultRequest
+                    {
+                        Applied = false,
+                        ApplyMessage = applyErrorMsg,
+                        Build = new ClientBuildResult { Attempted = false, Summary = "적용 실패로 빌드 생략" },
+                        Tests = new ClientTestResult { Attempted = false, Summary = "적용 실패로 테스트 생략" }
+                    };
+                }
+                else
+                {
+                    _txtStatus.Text = "적용 완료. 빌드/테스트 실행 중...";
+                    SetBusy(true);
+
+                    // 빌드/테스트 실행
+                    clientResult = new ClientResultRequest { Applied = true };
+                    var solutionPath = await GetSolutionPathAsync();
+                    if (!string.IsNullOrEmpty(solutionPath))
+                    {
+                        var buildResult = await _buildRunner.BuildAsync(solutionPath);
+                        clientResult.Build = new ClientBuildResult
+                        {
+                            Attempted = buildResult.Attempted,
+                            Succeeded = buildResult.Succeeded,
+                            Summary = buildResult.Summary
+                        };
+
+                        if (buildResult.Succeeded == true)
+                        {
+                            var testResult = await _buildRunner.TestAsync(solutionPath);
+                            clientResult.Tests = new ClientTestResult
+                            {
+                                Attempted = testResult.Attempted,
+                                Succeeded = testResult.Succeeded,
+                                Summary = testResult.Summary
+                            };
+                        }
+                    }
+                }
+
+                // 결과를 서버로 전송
+                var finalSnapshot = await _client.SendClientResultAsync(serverUrl, msg.RunId, clientResult);
+
+                // 폴링 재개하여 최종 요약 대기
+                _pollCts?.Cancel();
+                _pollCts = new CancellationTokenSource();
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                await PollRunAsync(serverUrl, msg.RunId, msg, msg.CodeChange?.SelectionOnly ?? false, sw, _pollCts.Token);
             }
             catch (Exception ex)
             {
                 _txtStatus.Text = "적용 실패: " + ex.Message;
+                SetBusy(false);
             }
         }
 
-        private async Task RejectChangeAsync(ChatMessageViewModel msg)
+        private async Task RejectRunChangeAsync(ChatMessageViewModel msg)
         {
-            if (_conversationId == null) return;
+            if (msg.RunId == null) return;
 
             msg.Approval = ApprovalState.Rejected;
             UpdateApprovalUI(msg);
@@ -502,11 +934,24 @@ namespace LocalMcpVsExtension.ToolWindows
             try
             {
                 var serverUrl = _txtServerUrl.Text.TrimEnd('/');
-                await _client.SendApprovalAsync(serverUrl, _conversationId, false);
+                await _client.SendRunApprovalAsync(serverUrl, msg.RunId, false);
             }
             catch { /* 서버 통보 실패는 무시 */ }
 
             _txtStatus.Text = "변경이 거부되었습니다.";
+        }
+
+        private async Task<string> GetSolutionPathAsync()
+        {
+            try
+            {
+                var solution = await VS.Solutions.GetCurrentSolutionAsync();
+                return solution?.FullPath;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         // ── 채팅 메시지 렌더링 ───────────────────────────────────
@@ -776,7 +1221,7 @@ namespace LocalMcpVsExtension.ToolWindows
 #pragma warning disable VSSDK007
                 _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
                 {
-                    await ApproveChangeAsync(msg);
+                    await ApproveRunChangeAsync(msg);
                 });
 #pragma warning restore VSSDK007
             };
@@ -795,7 +1240,7 @@ namespace LocalMcpVsExtension.ToolWindows
 #pragma warning disable VSSDK007
                 _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
                 {
-                    await RejectChangeAsync(msg);
+                    await RejectRunChangeAsync(msg);
                 });
 #pragma warning restore VSSDK007
             };

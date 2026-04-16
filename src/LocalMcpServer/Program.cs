@@ -45,6 +45,10 @@ builder.Services.AddSingleton<ToolRegistryService>(sp =>
 builder.Services.AddSingleton<IConversationStore, InMemoryConversationStore>();
 builder.Services.AddSingleton<IntentResolver>();
 
+// --- Run Orchestration 모듈 (contracts.md §11, pipeline.md v2.1) ---
+builder.Services.AddSingleton<DocumentSearcher>();
+builder.Services.AddSingleton<RunOrchestrator>();
+
 var app = builder.Build();
 
 // --- Startup: Ollama 연결 확인 ---

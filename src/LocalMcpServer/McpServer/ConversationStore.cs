@@ -14,11 +14,15 @@ public interface IConversationStore
     ConversationState GetOrCreate(string? conversationId);
     ConversationState? Get(string conversationId);
     void CleanupExpired();
+    void AddRun(RunData run);
+    RunData? GetRun(string runId);
+    IReadOnlyList<RunData> ListRuns(string conversationId);
 }
 
 public sealed class InMemoryConversationStore : IConversationStore
 {
     private readonly ConcurrentDictionary<string, ConversationState> _conversations = new();
+    private readonly ConcurrentDictionary<string, RunData> _runs = new();
     private readonly int _timeoutMinutes;
     private readonly int _maxHistory;
 
@@ -63,6 +67,24 @@ public sealed class InMemoryConversationStore : IConversationStore
             if (kvp.Value.LastAccess < cutoff)
                 _conversations.TryRemove(kvp.Key, out _);
         }
+    }
+
+    public void AddRun(RunData run)
+    {
+        _runs[run.RunId] = run;
+    }
+
+    public RunData? GetRun(string runId)
+    {
+        return _runs.TryGetValue(runId, out var run) ? run : null;
+    }
+
+    public IReadOnlyList<RunData> ListRuns(string conversationId)
+    {
+        return _runs.Values
+            .Where(r => r.ConversationId == conversationId)
+            .OrderByDescending(r => r.CreatedAt)
+            .ToList();
     }
 }
 

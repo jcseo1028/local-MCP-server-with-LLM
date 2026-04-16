@@ -127,6 +127,107 @@ public sealed class IntentResolver
     /// <summary>도구가 코드 수정 도구인지 확인한다.</summary>
     public static bool IsEditTool(string toolName) => EditTools.Contains(toolName);
 
+    /// <summary>
+    /// 의도와 메시지를 기반으로 실행 계획(2-5 단계)을 생성한다.
+    /// </summary>
+    public async Task<List<string>> GeneratePlanAsync(
+        IntentResult intent, string message, string? code, string? language, CancellationToken ct)
+    {
+        try
+        {
+            var prompt = await _promptLoader.LoadAndRenderAsync("planning", new Dictionary<string, string>
+            {
+                ["message"] = message,
+                ["intent_tool"] = intent.ToolName ?? "general_chat",
+                ["intent_description"] = intent.Description,
+                ["code"] = code ?? "(코드 없음)",
+                ["language"] = language ?? "unknown"
+            }, ct);
+
+            var llmRequest = new LlmRequest
+            {
+                Prompt = prompt,
+                Options = new LlmOptions
+                {
+                    Temperature = 0.2,
+                    MaxTokens = 512,
+                    NumCtx = 2048
+                }
+            };
+
+            var response = await _llm.GenerateAsync(llmRequest, ct);
+            return ParsePlanResponse(response.Text);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "계획 생성 실패");
+            return [intent.Description.Length > 0 ? intent.Description : message];
+        }
+    }
+
+    /// <summary>
+    /// Run 결과를 요약한다.
+    /// </summary>
+    public async Task<string> GenerateSummaryAsync(
+        string message, IntentResult intent, List<string> planItems,
+        string? toolResult, bool? approved, CancellationToken ct)
+    {
+        try
+        {
+            var prompt = await _promptLoader.LoadAndRenderAsync("run_summary", new Dictionary<string, string>
+            {
+                ["message"] = message,
+                ["intent_tool"] = intent.ToolName ?? "general_chat",
+                ["plan_items"] = string.Join("\n", planItems.Select((p, i) => $"{i + 1}. {p}")),
+                ["tool_result"] = toolResult ?? "(결과 없음)",
+                ["approved"] = approved?.ToString() ?? "N/A"
+            }, ct);
+
+            var llmRequest = new LlmRequest
+            {
+                Prompt = prompt,
+                Options = new LlmOptions
+                {
+                    Temperature = 0.3,
+                    MaxTokens = 512,
+                    NumCtx = 2048
+                }
+            };
+
+            var response = await _llm.GenerateAsync(llmRequest, ct);
+            return response.Text;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "요약 생성 실패");
+            return approved == true ? "작업이 완료되었습니다." : "작업이 취소 또는 실패했습니다.";
+        }
+    }
+
+    private List<string> ParsePlanResponse(string text)
+    {
+        var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var items = new List<string>();
+
+        foreach (var line in lines)
+        {
+            // "1. xxx" 또는 "- xxx" 형식 파싱
+            var trimmed = line.TrimStart('-', '*', ' ');
+            if (trimmed.Length > 0 && char.IsDigit(line[0]))
+            {
+                var dotIdx = trimmed.IndexOf('.');
+                if (dotIdx >= 0 && dotIdx < 4)
+                    trimmed = trimmed[(dotIdx + 1)..].TrimStart();
+            }
+
+            if (trimmed.Length > 0)
+                items.Add(trimmed);
+        }
+
+        // 최대 5개로 제한
+        return items.Count > 5 ? items.Take(5).ToList() : items.Count > 0 ? items : [text.Trim()];
+    }
+
     private IntentResult ParseIntentResponse(string text)
     {
         try

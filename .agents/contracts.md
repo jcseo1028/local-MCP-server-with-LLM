@@ -170,6 +170,14 @@ Config {
     conversationTimeoutMinutes: number // 대화 세션 타임아웃 (기본 30)
     maxConversationHistory: number     // 대화당 최대 메시지 수 (기본 20)
   }
+  documentSearch: {
+    directories: [string]  // 문서검색 대상 로컬 폴더 목록 (비어있으면 검색 생략)
+    filePatterns: [string] // 검색 대상 파일 패턴 (예: ["*.md", "*.txt", "*.pdf"])
+  }
+  build: {
+    offlineMode: boolean   // true이면 --no-restore 등 네트워크 차단 옵션 적용 (기본 true)
+    solutionPath: string | null // 빌드 대상 솔루션 경로 (null이면 VSIX가 전달한 경로 사용)
+  }
 }
 ```
 
@@ -177,7 +185,8 @@ Config {
 
 ## 7. MCP Tool Definitions
 
-Tool Registry에 등록되는 최소 도구 4종의 이름, 설명, 입출력을 정의한다.  
+Tool Registry에 등록되는 도구의 이름, 설명, 입출력을 정의한다.  
+구현 완료: 4종 (summarize, add_comments, refactor, fix). 미구현: 3종 (search_project_code, suggest_fix_from_error_log, ask_local_docs).  
 각 도구의 `inputSchema`와 출력은 아래를 따른다.
 
 ### 7a. summarize_current_code
@@ -435,6 +444,123 @@ ChatApprovalResponse {
 - 승인 시 VSIX가 에디터에 코드를 적용한 후 서버에 통지한다.
 - 거부 시 코드 적용 없이 서버에 통지한다.
 - 서버는 대화 상태를 갱신하여 후속 대화의 맥락에 반영한다.
+
+---
+
+## 11. Chat Run API (VS Extension ↔ MCP Server) — v2.1 예정
+
+§9/§10의 단건 Chat API를 다단계 오케스트레이션으로 확장한다.  
+상세 스펙: `.agents/changes/2026-04-16-vsix-chat-orchestration-spec.md` §7b 참조.
+
+### 11a. Run 시작
+
+```
+POST /api/chat/runs
+
+ChatRunStartRequest {
+  message: string
+  code: string | null
+  language: string | null
+  selectionOnly: boolean
+  conversationId: string | null
+  activeFilePath: string | null
+  solutionPath: string | null
+}
+
+ChatRunStartResponse {
+  conversationId: string
+  runId: string
+  state: string              // "Queued"
+}
+```
+
+### 11b. Run 상태 조회
+
+```
+GET /api/chat/runs/{runId}
+
+ChatRunSnapshot {
+  conversationId: string
+  runId: string
+  state: string              // §6a 실행 상태 참조
+  stages: [
+    {
+      stageId: string        // §6c 단계 ID
+      title: string
+      status: string         // Pending | InProgress | Completed | Skipped | Failed
+      message: string | null
+      startedAt: string | null
+      completedAt: string | null
+    }
+  ]
+  intent: {                  // intent_analysis 완료 후 채워짐
+    toolName: string | null
+    confidence: number
+    description: string
+  } | null
+  planItems: [string]        // planning 완료 후 채워짐
+  references: [              // document_search 완료 후 채워짐
+    {
+      title: string
+      source: string
+      excerpt: string
+    }
+  ]
+  proposal: {                // proposal_generation 완료 후 채워짐
+    summary: string
+    original: string | null
+    modified: string | null
+    requiresApproval: boolean
+  } | null
+  finalSummary: string | null
+  error: string | null
+}
+```
+
+### 11c. Run 승인/거부
+
+```
+POST /api/chat/runs/{runId}/approval
+
+ChatRunApprovalRequest {
+  approved: boolean
+}
+
+ChatRunApprovalResponse {
+  state: string              // "Running.Applying" 또는 "Rejected"
+}
+```
+
+### 11d. 클라이언트 결과 보고 (적용/빌드/테스트)
+
+```
+POST /api/chat/runs/{runId}/client-result
+
+ChatRunClientResultRequest {
+  applied: boolean
+  applyMessage: string | null
+  appliedTargets: [string]   // 적용된 파일 경로 목록
+  build: {
+    attempted: boolean
+    succeeded: boolean | null
+    summary: string | null
+  }
+  tests: {
+    attempted: boolean
+    succeeded: boolean | null
+    summary: string | null
+  }
+}
+
+ChatRunClientResultResponse {
+  finalSummary: string       // 서버가 전체 run 결과를 요약한 텍스트
+}
+```
+
+- VSIX는 폴링 방식(500ms~1s)으로 GET /api/chat/runs/{runId}를 조회하여 단계 진행 상태를 UI에 반영한다.
+- 빌드는 `--no-restore` 등 오프라인 모드로 실행하며, 패키지 복원이 필요하면 단계 메시지에 명시한다.
+- 테스트는 네트워크 의존이 없는 단위 테스트만 자동 실행 대상으로 한다. 네이밍 기반 필터링을 우선 적용하고 향후 어트리뷰트 기반으로 확장한다.
+- final_summary는 서버가 의도분석·계획·수정안 결과를 포함하여 생성하고, VSIX는 적용/빌드/테스트 결과를 별도로 추가 표시할 수 있다.
 
 ---
 

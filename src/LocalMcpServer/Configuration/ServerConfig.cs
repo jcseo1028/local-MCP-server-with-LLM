@@ -11,6 +11,8 @@ public sealed class ServerConfig
     public LlmSection Llm { get; set; } = new();
     public ToolsSection Tools { get; set; } = new();
     public ChatSection Chat { get; set; } = new();
+    public DocumentSearchSection DocumentSearch { get; set; } = new();
+    public BuildSection Build { get; set; } = new();
 }
 
 public sealed class ServerSection
@@ -39,4 +41,16 @@ public sealed class ChatSection
     public string? IntentModel { get; set; }
     public int ConversationTimeoutMinutes { get; set; } = 30;
     public int MaxConversationHistory { get; set; } = 20;
+}
+
+public sealed class DocumentSearchSection
+{
+    public string[] Directories { get; set; } = [];
+    public string[] FilePatterns { get; set; } = ["*.md", "*.txt"];
+}
+
+public sealed class BuildSection
+{
+    public bool OfflineMode { get; set; } = true;
+    public string? SolutionPath { get; set; }
 }
