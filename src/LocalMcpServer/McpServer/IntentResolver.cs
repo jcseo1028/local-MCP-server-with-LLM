@@ -118,8 +118,8 @@ public sealed class IntentResolver
             Options = new LlmOptions
             {
                 Temperature = 0.5,
-                MaxTokens = 1024,
-                NumCtx = 4096
+                MaxTokens = 4096,
+                NumCtx = 16384
             }
         };
 
@@ -182,7 +182,7 @@ public sealed class IntentResolver
                 ["message"] = message,
                 ["intent_tool"] = intent.ToolName ?? "general_chat",
                 ["plan_items"] = string.Join("\n", planItems.Select((p, i) => $"{i + 1}. {p}")),
-                ["tool_result"] = toolResult ?? "(결과 없음)",
+                ["tool_result"] = TruncateForSummary(toolResult, 6000),
                 ["approved"] = approved?.ToString() ?? "N/A"
             }, ct);
 
@@ -193,8 +193,8 @@ public sealed class IntentResolver
                 Options = new LlmOptions
                 {
                     Temperature = 0.3,
-                    MaxTokens = 512,
-                    NumCtx = 2048
+                    MaxTokens = 2048,
+                    NumCtx = 16384
                 }
             };
 
@@ -291,6 +291,21 @@ public sealed class IntentResolver
                 Description = "파싱 실패"
             };
         }
+    }
+
+    /// <summary>
+    /// 요약 프롬프트에 넣기 전에 tool_result를 적절한 길이로 절단한다.
+    /// 코드 수정 결과가 매우 길 수 있으므로 컨텍스트 윈도우를 보호한다.
+    /// </summary>
+    private static string TruncateForSummary(string? text, int maxChars)
+    {
+        if (string.IsNullOrEmpty(text))
+            return "(결과 없음)";
+
+        if (text.Length <= maxChars)
+            return text;
+
+        return text[..maxChars] + $"\n\n... (총 {text.Length}자 중 {maxChars}자까지 표시)";
     }
 }
 

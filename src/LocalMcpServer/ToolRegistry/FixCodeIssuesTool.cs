@@ -29,7 +29,7 @@ public sealed class FixCodeIssuesTool : CodeToolBase
     protected override LlmOptions GetLlmOptions() => new()
     {
         Temperature = 0.2,
-        MaxTokens = 4096,   // 수정된 전체 코드 출력
-        NumCtx = 8192
+        MaxTokens = 8192,   // 수정된 전체 코드 출력
+        NumCtx = 16384
     };
 }

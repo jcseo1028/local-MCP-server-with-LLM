@@ -30,7 +30,7 @@ public sealed class RefactorCurrentCodeTool : CodeToolBase
     protected override LlmOptions GetLlmOptions() => new()
     {
         Temperature = 0.3,
-        MaxTokens = 4096,   // 리팩터링된 전체 코드 출력
-        NumCtx = 8192
+        MaxTokens = 8192,   // 리팩터링된 전체 코드 출력
+        NumCtx = 16384
     };
 }

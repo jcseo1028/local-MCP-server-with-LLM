@@ -26,8 +26,8 @@ public abstract class CodeToolBase : IMcpTool
     protected virtual LlmOptions GetLlmOptions() => new()
     {
         Temperature = 0.3,
-        MaxTokens = 4096,
-        NumCtx = 8192
+        MaxTokens = 8192,
+        NumCtx = 16384
     };
 
     public async Task<ToolCallResult> ExecuteAsync(Dictionary<string, object?> arguments, CancellationToken ct = default)
