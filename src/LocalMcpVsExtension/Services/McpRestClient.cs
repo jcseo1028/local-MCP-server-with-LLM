@@ -266,6 +266,9 @@ namespace LocalMcpVsExtension.Services
         public string? ActiveFilePath { get; set; }
         public string? SolutionPath { get; set; }
         public bool IntentAndPlanOnly { get; set; }
+
+        // v2.2 멀티 파일 컨텍스트
+        public RunFileContextDto[]? Files { get; set; }
     }
 
     internal sealed class RunStartResponse
@@ -313,6 +316,29 @@ namespace LocalMcpVsExtension.Services
         public string? Original { get; set; }
         public string? Modified { get; set; }
         public bool RequiresApproval { get; set; }
+
+        // v2.2 멀티 파일 변경
+        public FileChangeDto[]? Changes { get; set; }
+        public bool IsMultiFile => Changes != null && Changes.Length > 0;
+    }
+
+    internal sealed class FileChangeDto
+    {
+        public string FilePath { get; set; } = "";
+        public string Original { get; set; } = "";
+        public string Modified { get; set; } = "";
+        public bool SelectionOnly { get; set; }
+        public bool IsNewFile { get; set; }
+        public string? Description { get; set; }
+    }
+
+    internal sealed class RunFileContextDto
+    {
+        public string FilePath { get; set; } = "";
+        public string Code { get; set; } = "";
+        public string? Language { get; set; }
+        public bool SelectionOnly { get; set; }
+        public string? SelectedCode { get; set; }
     }
 
     internal sealed class ClientResultRequest
@@ -322,6 +348,16 @@ namespace LocalMcpVsExtension.Services
         public string[] AppliedTargets { get; set; } = Array.Empty<string>();
         public ClientBuildResult Build { get; set; } = new ClientBuildResult();
         public ClientTestResult Tests { get; set; } = new ClientTestResult();
+
+        // v2.2 파일별 적용 결과
+        public FileApplyResultDto[]? ApplyResults { get; set; }
+    }
+
+    internal sealed class FileApplyResultDto
+    {
+        public string FilePath { get; set; } = "";
+        public bool Applied { get; set; }
+        public string? Message { get; set; }
     }
 
     internal sealed class ClientBuildResult

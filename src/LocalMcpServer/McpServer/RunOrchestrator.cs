@@ -58,7 +58,8 @@ public sealed class RunOrchestrator
             SelectionOnly = req.SelectionOnly,
             ActiveFilePath = req.ActiveFilePath,
             SolutionPath = req.SolutionPath,
-            IntentAndPlanOnly = req.IntentAndPlanOnly || _chatConfig.IntentAndPlanOnly
+            IntentAndPlanOnly = req.IntentAndPlanOnly || _chatConfig.IntentAndPlanOnly,
+            Files = req.Files  // v2.2 멀티 파일 컨텍스트
         };
 
         _store.AddRun(run);
@@ -344,13 +345,28 @@ public sealed class RunOrchestrator
                 if (IntentResolver.IsEditTool(run.Intent.ToolName) && run.Code is not null)
                 {
                     var modifiedCode = ExtractCodeFromResult(resultText);
-                    run.Proposal = new RunProposal
+
+                    // v2.2: [FILE:] 블록이 있으면 멀티 파일 모드
+                    var fileChanges = ParseFileBlocks(resultText, run);
+                    if (fileChanges.Count > 0)
                     {
-                        Summary = $"{run.Intent.ToolName} 수정안 생성",
-                        Original = run.Code,
-                        Modified = modifiedCode ?? resultText,
-                        RequiresApproval = true
-                    };
+                        run.Proposal = new RunProposal
+                        {
+                            Summary = $"{run.Intent.ToolName} 수정안 생성 ({fileChanges.Count}개 파일)",
+                            Changes = fileChanges,
+                            RequiresApproval = true
+                        };
+                    }
+                    else
+                    {
+                        run.Proposal = new RunProposal
+                        {
+                            Summary = $"{run.Intent.ToolName} 수정안 생성",
+                            Original = run.Code,
+                            Modified = modifiedCode ?? resultText,
+                            RequiresApproval = true
+                        };
+                    }
                 }
                 else
                 {
@@ -429,6 +445,57 @@ public sealed class RunOrchestrator
 
         run.State = RunState.Completed;
         _runLogger.LogFinalSummary(run.RunId, run);
+    }
+
+    /// <summary>
+    /// LLM 응답에서 [FILE: 경로]...[/FILE] 블록을 파싱하여 FileChange 목록을 반환한다.
+    /// 블록이 없으면 빈 목록을 반환한다 (단건 폴백).
+    /// </summary>
+    private static List<FileChange> ParseFileBlocks(string llmOutput, RunData run)
+    {
+        var result = new List<FileChange>();
+        var pattern = new System.Text.RegularExpressions.Regex(
+            @"\[FILE:\s*(?<path>[^\]]+)\](?<code>[\s\S]*?)\[/FILE\]",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        var matches = pattern.Matches(llmOutput);
+        foreach (System.Text.RegularExpressions.Match m in matches)
+        {
+            var filePath = m.Groups["path"].Value.Trim();
+            var modifiedCode = m.Groups["code"].Value.Trim();
+
+            // 코드 펜스 제거
+            var extracted = ExtractCodeFromResult(modifiedCode);
+            if (extracted != null) modifiedCode = extracted;
+
+            // 원본코드: run.Files에서 일치하는 파일 찾기, 없으면 단일파일 Code 사용
+            string originalCode = run.Code ?? "";
+            bool selectionOnly = run.SelectionOnly;
+            if (run.Files != null)
+            {
+                var match = run.Files.Find(f =>
+                    f.FilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase) ||
+                    System.IO.Path.GetFileName(f.FilePath).Equals(
+                        System.IO.Path.GetFileName(filePath), StringComparison.OrdinalIgnoreCase));
+                if (match != null)
+                {
+                    originalCode = match.SelectedCode ?? match.Code;
+                    selectionOnly = match.SelectionOnly;
+                }
+            }
+
+            result.Add(new FileChange
+            {
+                FilePath = filePath,
+                Original = originalCode,
+                Modified = modifiedCode,
+                SelectionOnly = selectionOnly,
+                IsNewFile = string.IsNullOrEmpty(originalCode),
+                Description = null
+            });
+        }
+
+        return result;
     }
 
     private static string? ExtractCodeFromResult(string result)

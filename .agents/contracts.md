@@ -481,13 +481,22 @@ POST /api/chat/runs
 
 ChatRunStartRequest {
   message: string
-  code: string | null
+  code: string | null           // 단일 파일 코드 (하위 호환)
   language: string | null
   selectionOnly: boolean
   conversationId: string | null
-  activeFilePath: string | null
+  activeFilePath: string | null // 단일 파일 경로 (하위 호환)
   solutionPath: string | null
-  intentAndPlanOnly: boolean   // true이면 의도 분석·계획 수립까지만 실행하고 나머지 단계를 skip 처리
+  intentAndPlanOnly: boolean    // true이면 의도 분석·계획 수립까지만 실행
+  files: [                      // 멀티 파일 컨텍스트 (null이면 단건 필드 사용) — v2.2
+    {
+      filePath: string
+      code: string
+      language: string | null
+      selectionOnly: boolean
+      selectedCode: string | null
+    }
+  ] | null
 }
 
 ChatRunStartResponse {
@@ -531,9 +540,19 @@ ChatRunSnapshot {
   ]
   proposal: {                // proposal_generation 완료 후 채워짐
     summary: string
-    original: string | null
-    modified: string | null
     requiresApproval: boolean
+    original: string | null   // 단건 (하위 호환, deprecated)
+    modified: string | null   // 단건 (하위 호환, deprecated)
+    changes: [                // 파일별 변경 목록 — v2.2 (null이면 단건 사용)
+      {
+        filePath: string
+        original: string
+        modified: string
+        selectionOnly: boolean
+        isNewFile: boolean
+        description: string | null
+      }
+    ] | null
   } | null
   finalSummary: string | null
   error: string | null
@@ -562,7 +581,14 @@ POST /api/chat/runs/{runId}/client-result
 ChatRunClientResultRequest {
   applied: boolean
   applyMessage: string | null
-  appliedTargets: [string]   // 적용된 파일 경로 목록
+  appliedTargets: [string]    // 적용된 파일 경로 목록
+  applyResults: [             // 파일별 적용 결과 — v2.2 (null이면 단건 applied 사용)
+    {
+      filePath: string
+      applied: boolean
+      message: string | null
+    }
+  ] | null
   build: {
     attempted: boolean
     succeeded: boolean | null

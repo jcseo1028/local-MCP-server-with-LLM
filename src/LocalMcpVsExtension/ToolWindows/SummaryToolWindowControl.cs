@@ -448,6 +448,26 @@ namespace LocalMcpVsExtension.ToolWindows
                                 ToolName = snapshot.Intent?.ToolName ?? "",
                                 SelectionOnly = selectionOnly
                             };
+
+                            // v2.2: 멀티 파일 변경이 있으면 Files 목록 설정
+                            if (snapshot.Proposal.IsMultiFile && snapshot.Proposal.Changes != null)
+                            {
+                                var fileList = new System.Collections.Generic.List<FileChangeInfo>();
+                                foreach (var fc in snapshot.Proposal.Changes)
+                                {
+                                    fileList.Add(new FileChangeInfo
+                                    {
+                                        FilePath = fc.FilePath,
+                                        Original = fc.Original,
+                                        Modified = fc.Modified,
+                                        SelectionOnly = fc.SelectionOnly,
+                                        IsNewFile = fc.IsNewFile,
+                                        Description = fc.Description
+                                    });
+                                }
+                                runVm.CodeChange.Files = fileList;
+                            }
+
                             runVm.Approval = ApprovalState.Pending;
 
                             // UI 업데이트: diff + 승인 버튼 추가
@@ -856,37 +876,87 @@ namespace LocalMcpVsExtension.ToolWindows
 
                 try
                 {
-                    using (var edit = docView.TextBuffer.CreateEdit())
+                    if (msg.CodeChange.IsMultiFile && msg.CodeChange.Files != null)
                     {
+                        // v2.2: 멀티 파일 적용
+                        var failedFiles = new System.Collections.Generic.List<string>();
+                        foreach (var fc in msg.CodeChange.Files)
+                        {
+                            try
+                            {
+                                if (fc.IsNewFile)
+                                {
+                                    await CreateNewFileAsync(fc.FilePath, fc.Modified);
+                                }
+                                else
+                                {
+                                    await ApplyHunksToFileAsync(fc);
+                                }
+                            }
+                            catch (Exception fcEx)
+                            {
+                                failedFiles.Add($"{fc.FilePath}: {fcEx.Message}");
+                            }
+                        }
+                        if (failedFiles.Count > 0)
+                        {
+                            applyFailed = true;
+                            applyErrorMsg = "일부 파일 적용 실패: " + string.Join("; ", failedFiles);
+                        }
+                    }
+                    else
+                    {
+                        // 단일 파일 경로 (기존 로직)
+                        var originalText = msg.CodeChange.SelectionOnly
+                            ? NormalizeNewlines(msg.CodeChange.Original ?? string.Empty, snapshot)
+                            : snapshot.GetText();
+
+                        // SelectionOnly: 문서 내 원본 위치(offset) 보정
+                        int baseOffset = 0;
                         if (msg.CodeChange.SelectionOnly && !string.IsNullOrEmpty(msg.CodeChange.Original))
                         {
                             var fullText = snapshot.GetText();
-                            var normalizedOriginal = NormalizeNewlines(msg.CodeChange.Original, snapshot);
-                            int idx = fullText.IndexOf(normalizedOriginal, StringComparison.Ordinal);
-                            if (idx >= 0)
-                            {
-                                edit.Replace(idx, normalizedOriginal.Length, modifiedCode);
-                                edit.Apply();
-                            }
-                            else
+                            baseOffset = fullText.IndexOf(originalText, StringComparison.Ordinal);
+                            if (baseOffset < 0)
                             {
                                 applyFailed = true;
                                 applyErrorMsg = "원본 텍스트 매칭 실패: 문서가 변경되었을 수 있습니다.";
-                                // using 블록 종료 시 자동 취소
+                                goto ApplyFailed;
                             }
+                        }
+
+                        // diff 계산 (라인 단위)
+                        var hunks = LineDiffEngine.Compute(originalText, modifiedCode);
+
+                        if (hunks.Count == 0)
+                        {
+                            // 변경 없음 — 적용은 건너뛰되 승인 플로우는 계속
+                            _txtStatus.Text = "변경 없음: LLM 출력이 원본과 동일합니다.";
                         }
                         else
                         {
-                            edit.Replace(0, snapshot.Length, modifiedCode);
-                            edit.Apply();
+                            using (var edit = docView.TextBuffer.CreateEdit())
+                            {
+                                // 역순 적용으로 앞 hunk 적용이 뒤 hunk의 offset을 바꾸는 문제 방지
+                                foreach (var hunk in System.Linq.Enumerable.OrderByDescending(
+                                    hunks, h => h.OriginalStart))
+                                {
+                                    var span = GetLineSpanInSnapshot(snapshot, hunk.OriginalStart,
+                                                                     hunk.OriginalEnd, baseOffset);
+                                    edit.Replace(span, hunk.NewText);
+                                }
+                                edit.Apply();
+                            }
                         }
-                    }
+                    } // end else (single-file)
                 }
                 catch (Exception applyEx)
                 {
                     applyFailed = true;
                     applyErrorMsg = "코드 적용 중 오류: " + applyEx.Message;
                 }
+
+                ApplyFailed:
 
                 msg.Approval = ApprovalState.Approved;
                 UpdateApprovalUI(msg);
@@ -1142,6 +1212,44 @@ namespace LocalMcpVsExtension.ToolWindows
 
         private UIElement CreateDiffView(ChatMessageViewModel msg, Color fg, Color bg, bool isDark)
         {
+            // v2.2: 멀티 파일인 경우 각 파일을 Expander로 표시
+            if (msg.CodeChange?.IsMultiFile == true && msg.CodeChange.Files != null)
+            {
+                var container = new StackPanel { Margin = new Thickness(0, 8, 0, 4) };
+                foreach (var fc in msg.CodeChange.Files)
+                {
+                    var expander = new Expander
+                    {
+                        IsExpanded = true,
+                        Margin = new Thickness(0, 0, 0, 4)
+                    };
+                    expander.Header = new TextBlock
+                    {
+                        Text = (fc.IsNewFile ? "[새 파일] " : "") + fc.FilePath,
+                        FontWeight = FontWeights.Bold,
+                        Foreground = new SolidColorBrush(fg)
+                    };
+
+                    var fakeMsg = new ChatMessageViewModel
+                    {
+                        CodeChange = new CodeChangeInfo
+                        {
+                            Original = fc.Original,
+                            Modified = fc.Modified,
+                            SelectionOnly = fc.SelectionOnly
+                        }
+                    };
+                    expander.Content = CreateSingleFileDiffView(fakeMsg, fg, bg, isDark);
+                    container.Children.Add(expander);
+                }
+                return container;
+            }
+
+            return CreateSingleFileDiffView(msg, fg, bg, isDark);
+        }
+
+        private UIElement CreateSingleFileDiffView(ChatMessageViewModel msg, Color fg, Color bg, bool isDark)
+        {
             var diffGrid = new Grid { Margin = new Thickness(0, 8, 0, 4) };
             diffGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             diffGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(4) });
@@ -1334,6 +1442,101 @@ namespace LocalMcpVsExtension.ToolWindows
         {
             double brightness = (0.299 * c.R + 0.587 * c.G + 0.114 * c.B) / 255.0;
             return brightness < 0.5;
+        }
+
+        // ── Diff 적용 유틸리티 ─────────────────────────────────
+
+        /// <summary>
+        /// v2.2: 새 파일을 생성하고 에디터에서 엽니다.
+        /// </summary>
+        private static async Task CreateNewFileAsync(string filePath, string content)
+        {
+            var dir = System.IO.Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(dir))
+                System.IO.Directory.CreateDirectory(dir);
+            System.IO.File.WriteAllText(filePath, content, System.Text.Encoding.UTF8);
+            await VS.Documents.OpenAsync(filePath);
+        }
+
+        /// <summary>
+        /// v2.2: FileChangeInfo를 기반으로 대상 파일을 열고 hunk를 적용합니다.
+        /// </summary>
+        private async Task ApplyHunksToFileAsync(FileChangeInfo fc)
+        {
+            var docView = await VS.Documents.OpenAsync(fc.FilePath);
+            if (docView?.TextBuffer == null)
+                throw new InvalidOperationException($"파일을 열 수 없습니다: {fc.FilePath}");
+
+            var snapshot = docView.TextBuffer.CurrentSnapshot;
+            var modifiedCode = NormalizeNewlines(fc.Modified, snapshot);
+            modifiedCode = NormalizeIndentation(modifiedCode, snapshot);
+
+            var originalText = fc.SelectionOnly
+                ? NormalizeNewlines(fc.Original ?? string.Empty, snapshot)
+                : snapshot.GetText();
+
+            int baseOffset = 0;
+            if (fc.SelectionOnly && !string.IsNullOrEmpty(fc.Original))
+            {
+                var fullText = snapshot.GetText();
+                baseOffset = fullText.IndexOf(originalText, StringComparison.Ordinal);
+                if (baseOffset < 0)
+                    throw new InvalidOperationException("원본 텍스트 매칭 실패");
+            }
+
+            var hunks = LineDiffEngine.Compute(originalText, modifiedCode);
+            if (hunks.Count == 0) return;
+
+            using (var edit = docView.TextBuffer.CreateEdit())
+            {
+                foreach (var hunk in System.Linq.Enumerable.OrderByDescending(hunks, h => h.OriginalStart))
+                {
+                    var span = GetLineSpanInSnapshot(snapshot, hunk.OriginalStart, hunk.OriginalEnd, baseOffset);
+                    edit.Replace(span, hunk.NewText);
+                }
+                edit.Apply();
+            }
+        }
+
+        /// <summary>
+        /// snapshot 내에서 baseOffset(문자 위치)을 기준으로
+        /// startLine~endLine(0-based, exclusive) 범위의 Span을 반환한다.
+        /// </summary>
+        private static Microsoft.VisualStudio.Text.Span GetLineSpanInSnapshot(
+            Microsoft.VisualStudio.Text.ITextSnapshot snapshot,
+            int startLine, int endLine, int baseOffset)
+        {
+            // baseOffset 이 가리키는 문자 위치를 실제 라인 번호로 변환
+            int baseLine = snapshot.GetLineNumberFromPosition(baseOffset);
+
+            int absStart = baseLine + startLine;
+            int absEnd   = baseLine + endLine;
+
+            // 범위 클램핑
+            absStart = Math.Max(0, Math.Min(absStart, snapshot.LineCount - 1));
+
+            var startLineObj = snapshot.GetLineFromLineNumber(absStart);
+
+            if (absEnd <= absStart)
+            {
+                // 순수 삽입: 라인 시작 위치에 길이 0 span
+                return new Microsoft.VisualStudio.Text.Span(startLineObj.Start.Position, 0);
+            }
+
+            absEnd = Math.Min(absEnd, snapshot.LineCount);
+            int endPosition;
+            if (absEnd >= snapshot.LineCount)
+            {
+                endPosition = snapshot.Length;
+            }
+            else
+            {
+                var endLineObj = snapshot.GetLineFromLineNumber(absEnd);
+                endPosition = endLineObj.Start.Position;
+            }
+
+            return Microsoft.VisualStudio.Text.Span.FromBounds(
+                startLineObj.Start.Position, endPosition);
         }
 
         // ── 코드 정규화 유틸리티 ─────────────────────────────────

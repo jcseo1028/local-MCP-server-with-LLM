@@ -140,6 +140,20 @@ namespace LocalMcpVsExtension.Services
         public string Modified { get; set; } = "";
         public string ToolName { get; set; } = "";
         public bool SelectionOnly { get; set; }
+
+        // v2.2 멀티 파일 지원
+        public List<FileChangeInfo>? Files { get; set; }
+        public bool IsMultiFile => Files != null && Files.Count > 0;
+    }
+
+    internal sealed class FileChangeInfo
+    {
+        public string FilePath { get; set; } = "";
+        public string Original { get; set; } = "";
+        public string Modified { get; set; } = "";
+        public bool SelectionOnly { get; set; }
+        public bool IsNewFile { get; set; }
+        public string? Description { get; set; }
     }
 
     /// <summary>과거 대화 세션 백업</summary>

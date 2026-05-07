@@ -108,6 +108,7 @@ public sealed class RunData
     public string? ActiveFilePath { get; set; }
     public string? SolutionPath { get; set; }
     public bool IntentAndPlanOnly { get; set; }
+    public List<FileContext>? Files { get; set; } // v2.2 멀티 파일 컨텍스트
 
     // 단계
     public List<RunStage> Stages { get; set; } = StageIds.All
@@ -137,12 +138,39 @@ public sealed class DocumentReference
 public sealed class RunProposal
 {
     public string Summary { get; set; } = "";
+    public bool RequiresApproval { get; set; }
+
+    // 하위 호환 단건 (deprecated — 신규 코드에서 사용 금지)
     public string? Original { get; set; }
     public string? Modified { get; set; }
-    public bool RequiresApproval { get; set; }
+
+    // 멀티 파일 변경 목록 — v2.2
+    public List<FileChange>? Changes { get; set; }
+
+    /// <summary>true면 멀티 파일 모드로 동작</summary>
+    public bool IsMultiFile => Changes != null && Changes.Count > 0;
 }
 
 // --- API DTO ---
+
+public sealed class FileChange
+{
+    public string FilePath { get; set; } = "";
+    public string Original { get; set; } = "";
+    public string Modified { get; set; } = "";
+    public bool SelectionOnly { get; set; }
+    public bool IsNewFile { get; set; }
+    public string? Description { get; set; }
+}
+
+public sealed class FileContext
+{
+    public string FilePath { get; set; } = "";
+    public string Code { get; set; } = "";
+    public string? Language { get; set; }
+    public bool SelectionOnly { get; set; }
+    public string? SelectedCode { get; set; }
+}
 
 public sealed class ChatRunStartRequest
 {
@@ -154,6 +182,9 @@ public sealed class ChatRunStartRequest
     public string? ActiveFilePath { get; set; }
     public string? SolutionPath { get; set; }
     public bool IntentAndPlanOnly { get; set; }
+
+    // 멀티 파일 컨텍스트 — v2.2 (null이면 단건 필드 사용)
+    public List<FileContext>? Files { get; set; }
 }
 
 public sealed class ChatRunClientResultRequest
@@ -161,8 +192,19 @@ public sealed class ChatRunClientResultRequest
     public bool Applied { get; set; }
     public string? ApplyMessage { get; set; }
     public string[] AppliedTargets { get; set; } = [];
+
+    // 파일별 적용 결과 — v2.2 (null이면 단건 Applied 사용)
+    public List<FileApplyResult>? ApplyResults { get; set; }
+
     public BuildResult Build { get; set; } = new();
     public TestResult Tests { get; set; } = new();
+}
+
+public sealed class FileApplyResult
+{
+    public string FilePath { get; set; } = "";
+    public bool Applied { get; set; }
+    public string? Message { get; set; }
 }
 
 public sealed class BuildResult
