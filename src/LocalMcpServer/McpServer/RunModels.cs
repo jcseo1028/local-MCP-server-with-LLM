@@ -107,6 +107,7 @@ public sealed class RunData
     public bool SelectionOnly { get; set; }
     public string? ActiveFilePath { get; set; }
     public string? SolutionPath { get; set; }
+    public bool IntentAndPlanOnly { get; set; }
 
     // 단계
     public List<RunStage> Stages { get; set; } = StageIds.All
@@ -116,6 +117,7 @@ public sealed class RunData
     // 결과
     public IntentResult? Intent { get; set; }
     public List<string> PlanItems { get; set; } = [];
+    public string? PlanRawLlmResponse { get; set; }
     public List<DocumentReference> References { get; set; } = [];
     public RunProposal? Proposal { get; set; }
     public string? FinalSummary { get; set; }
@@ -151,6 +153,7 @@ public sealed class ChatRunStartRequest
     public string? ConversationId { get; set; }
     public string? ActiveFilePath { get; set; }
     public string? SolutionPath { get; set; }
+    public bool IntentAndPlanOnly { get; set; }
 }
 
 public sealed class ChatRunClientResultRequest

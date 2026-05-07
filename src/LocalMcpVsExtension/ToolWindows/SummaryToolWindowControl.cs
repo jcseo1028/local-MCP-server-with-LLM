@@ -727,9 +727,8 @@ namespace LocalMcpVsExtension.ToolWindows
                     {
                         Document = flowDoc,
                         IsToolBarVisible = false,
-                        VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                        VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                         HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                        MaxHeight = 400,
                         Background = Brushes.Transparent,
                         BorderThickness = new Thickness(0)
                     };
@@ -1091,9 +1090,8 @@ namespace LocalMcpVsExtension.ToolWindows
                         {
                             Document = flowDoc,
                             IsToolBarVisible = false,
-                            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                            MaxHeight = 400,
                             Background = Brushes.Transparent,
                             BorderThickness = new Thickness(0)
                         };

@@ -6,6 +6,7 @@ namespace LocalMcpServer.LlmConnector;
 public sealed class LlmRequest
 {
     public required string Prompt { get; set; }
+    public string? SystemPrompt { get; set; }
     public object? Context { get; set; }
     public string? Model { get; set; }
     public LlmOptions Options { get; set; } = new();
@@ -17,6 +18,8 @@ public sealed class LlmOptions
     public int MaxTokens { get; set; } = 4096;
     /// <summary>Ollama num_ctx — 컨텍스트 윈도우 크기. 작을수록 빠름.</summary>
     public int NumCtx { get; set; } = 16384;
+    /// <summary>응답 형식. "json"으로 설정하면 Ollama가 유효한 JSON만 출력한다.</summary>
+    public string? ResponseFormat { get; set; }
 }
 
 /// <summary>

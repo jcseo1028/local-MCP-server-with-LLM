@@ -170,6 +170,7 @@ Config {
     intentModel: string | null   // 의도 분석용 모델 (null이면 defaultModel)
     conversationTimeoutMinutes: number // 대화 세션 타임아웃 (기본 30)
     maxConversationHistory: number     // 대화당 최대 메시지 수 (기본 20)
+    intentAndPlanOnly: boolean         // true이면 모든 Run에서 의도 분석·계획 수립까지만 실행 (기본 false). 요청 단위 플래그와 OR 결합.
   }
   documentSearch: {
     directories: [string]  // 문서검색 대상 로컬 폴더 목록 (비어있으면 검색 생략)
@@ -188,6 +189,7 @@ Config {
 
 Tool Registry에 등록되는 도구의 이름, 설명, 입출력을 정의한다.  
 구현 완료: 4종 (summarize, add_comments, refactor, fix). 미구현: 3종 (search_project_code, suggest_fix_from_error_log, ask_local_docs).  
+추가 구현: analyze_project_structure (프로젝트 전체 구조 분석).
 각 도구의 `inputSchema`와 출력은 아래를 따른다.
 
 ### 7a. summarize_current_code
@@ -232,6 +234,25 @@ Output {
 ```
 
 - **사용 모듈**: Resource Cache (CodeSearchRequest)
+
+### 7b-2. analyze_project_structure
+
+프로젝트 전체의 파일/심볼 구조를 분석하여 아키텍처를 요약한다.
+
+```
+Input {
+  code: string | null     // 현재 열린 코드 (참고용, 선택)
+  language: string | null // 프로그래밍 언어 (선택)
+}
+
+Output {
+  text: string            // 프로젝트 구조 분석 결과 (한국어)
+}
+```
+
+- **사용 모듈**: Resource Cache (GetProjectStructureSummary — 코드 인덱스 기반 파일/심볼 목록), LLM Connector (Temperature 0.3, MaxTokens 4096, NumCtx 16384)
+- **프롬프트**: `prompts/analyze_project_structure.prompt.md`
+- **참고**: 단일 파일이 아닌 프로젝트 전체를 대상으로 한다. SolutionPath가 전달되어 코드 인덱스가 구축된 상태에서 동작한다.
 
 ### 7c. add_comments
 
@@ -466,6 +487,7 @@ ChatRunStartRequest {
   conversationId: string | null
   activeFilePath: string | null
   solutionPath: string | null
+  intentAndPlanOnly: boolean   // true이면 의도 분석·계획 수립까지만 실행하고 나머지 단계를 skip 처리
 }
 
 ChatRunStartResponse {

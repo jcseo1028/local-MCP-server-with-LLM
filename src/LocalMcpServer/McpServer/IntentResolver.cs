@@ -54,8 +54,8 @@ public sealed class IntentResolver
                 description = t.Description
             }));
 
-            // 프롬프트 로드 및 변수 치환
-            var prompt = await _promptLoader.LoadAndRenderAsync("intent_analysis", new Dictionary<string, string>
+            // 프롬프트 로드 및 변수 치환 — system instruction으로 사용
+            var systemPrompt = await _promptLoader.LoadAndRenderAsync("intent_analysis", new Dictionary<string, string>
             {
                 ["message"] = message,
                 ["tools"] = toolsJson,
@@ -64,35 +64,114 @@ public sealed class IntentResolver
 
             var intentModel = !string.IsNullOrEmpty(_config.Chat.IntentModel)
                 ? _config.Chat.IntentModel
-                : _config.Llm.GeneralModel; // GeneralModel 우선, null이면 OllamaConnector가 defaultModel 사용
+                : _config.Llm.GeneralModel;
 
             var llmRequest = new LlmRequest
             {
-                Prompt = prompt,
+                SystemPrompt = systemPrompt,
+                Prompt = $"사용자 메시지: \"{message}\"\n위 지시사항에 따라 JSON만 출력하세요.",
                 Model = intentModel,
                 Options = new LlmOptions
                 {
                     Temperature = 0.1,
-                    MaxTokens = 200,
-                    NumCtx = 2048
+                    MaxTokens = 256,
+                    NumCtx = 4096,
+                    ResponseFormat = "json"
                 }
             };
 
-            var llmResponse = await _llm.GenerateAsync(llmRequest, ct);
+            var llmResponse = await _llm.GenerateWithRetryAsync(llmRequest, maxRetries: 2, ct);
 
-            // LLM 응답에서 JSON 파싱
-            return ParseIntentResponse(llmResponse.Text);
+            // LLM 응답에서 JSON 파싱 — 빈 응답이면 키워드 fallback
+            if (string.IsNullOrWhiteSpace(llmResponse.Text))
+            {
+                _logger.LogWarning("의도 분석 LLM 빈 응답, 키워드 fallback 사용");
+                var fb = FallbackIntentByKeyword(message);
+                fb.RawLlmResponse = "(빈 응답)";
+                fb.FallbackUsed = true;
+                return fb;
+            }
+
+            var result = ParseIntentResponse(llmResponse.Text);
+            result.RawLlmResponse = llmResponse.Text;
+
+            // LLM이 응답했지만 파싱 실패(ToolName=null, Confidence=0)이면 키워드 fallback
+            if (result.ToolName is null && result.Confidence == 0.0)
+            {
+                var fallback = FallbackIntentByKeyword(message);
+                if (fallback.ToolName is not null)
+                {
+                    _logger.LogInformation("LLM 파싱 실패 → 키워드 fallback 적용: {Tool}", fallback.ToolName);
+                    fallback.RawLlmResponse = llmResponse.Text;
+                    fallback.FallbackUsed = true;
+                    return fallback;
+                }
+            }
+
+            return result;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "의도 분석 실패, 일반 대화로 처리");
+            _logger.LogWarning(ex, "의도 분석 실패, 키워드 fallback 사용");
+            var fb = FallbackIntentByKeyword(message);
+            fb.RawLlmResponse = ex.Message;
+            fb.FallbackUsed = true;
+            return fb;
+        }
+    }
+
+    /// <summary>
+    /// LLM 응답이 비어 있거나 실패할 때 메시지 키워드로 의도를 추론한다.
+    /// </summary>
+    private IntentResult FallbackIntentByKeyword(string message)
+    {
+        var msg = message.ToLowerInvariant();
+
+        // 복합 조건 매핑 — (필수 키워드 조합, toolName, description)
+        // AllOf: 모든 키워드가 포함되어야 매칭 (AND 조건, 더 구체적)
+        // AnyOf: 하나라도 포함되면 매칭 (OR 조건)
+        var mappings = new (string[]? allOf, string[] anyOf, string toolName, string description, double confidence)[]
+        {
+            // 프로젝트 구조 분석 — "프로젝트" + ("구조"|"아키텍처"|"모듈"|"디렉터리") 조합 필요
+            (["프로젝트"], ["구조", "아키텍처", "모듈", "디렉터리 구성"], "analyze_project_structure", "프로젝트 구조 분석 요청", 0.6),
+
+            // 코드 분석/요약 — "코드" + ("분석"|"설명"|"요약") 또는 단독 "요약"/"설명해"
+            (["코드"], ["분석", "설명", "요약", "리뷰"], "summarize_current_code", "코드 분석/요약 요청", 0.6),
+            (null, ["요약", "설명해", "알려줘"], "summarize_current_code", "현재 코드 요약 요청", 0.5),
+
+            // 나머지는 기존 단일 키워드 매칭
+            (null, ["주석", "코멘트", "comment", "문서화", "doc"], "add_comments", "코드 주석 추가 요청", 0.5),
+            (null, ["리팩터", "리팩토링", "refactor", "개선", "정리"], "refactor_current_code", "코드 리팩터링 요청", 0.5),
+            (null, ["버그", "오류", "fix", "수정", "고쳐"], "fix_code_issues", "코드 수정 요청", 0.5),
+            (null, ["검색", "찾아", "search", "어디"], "search_project_code", "코드 검색 요청", 0.5),
+            (null, ["에러", "로그", "error", "스택", "exception"], "suggest_fix_from_error_log", "에러 로그 기반 수정 요청", 0.5),
+        };
+
+        foreach (var (allOf, anyOf, toolName, description, confidence) in mappings)
+        {
+            // allOf가 있으면 모든 키워드가 포함되어야 함
+            if (allOf is not null && !allOf.All(k => msg.Contains(k)))
+                continue;
+
+            // anyOf 중 하나라도 매칭되어야 함
+            if (!anyOf.Any(k => msg.Contains(k)))
+                continue;
+
+            _logger.LogInformation("키워드 fallback 매칭: tool={Tool}, message=\"{Message}\"", toolName, message);
             return new IntentResult
             {
-                ToolName = null,
-                Confidence = 0.0,
-                Description = "의도 분석 실패"
+                ToolName = toolName,
+                Confidence = confidence,
+                Description = description
             };
         }
+
+        return new IntentResult
+        {
+            ToolName = null,
+            Confidence = 0.1,
+            Description = "일반 대화 (키워드 fallback)"
+        };
     }
 
     /// <summary>
@@ -133,12 +212,12 @@ public sealed class IntentResolver
     /// <summary>
     /// 의도와 메시지를 기반으로 실행 계획(2-5 단계)을 생성한다.
     /// </summary>
-    public async Task<List<string>> GeneratePlanAsync(
+    public async Task<(List<string> Items, string? RawResponse)> GeneratePlanAsync(
         IntentResult intent, string message, string? code, string? language, CancellationToken ct)
     {
         try
         {
-            var prompt = await _promptLoader.LoadAndRenderAsync("planning", new Dictionary<string, string>
+            var systemPrompt = await _promptLoader.LoadAndRenderAsync("planning", new Dictionary<string, string>
             {
                 ["message"] = message,
                 ["intent_tool"] = intent.ToolName ?? "general_chat",
@@ -148,23 +227,24 @@ public sealed class IntentResolver
 
             var llmRequest = new LlmRequest
             {
-                Prompt = prompt,
+                SystemPrompt = systemPrompt,
+                Prompt = $"사용자 요청: \"{message}\"\n의도: {intent.Description}\n위 규칙에 따라 번호 목록만 출력하세요.",
                 Model = _config.Llm.GeneralModel,
                 Options = new LlmOptions
                 {
                     Temperature = 0.2,
                     MaxTokens = 512,
-                    NumCtx = 2048
+                    NumCtx = 4096
                 }
             };
 
-            var response = await _llm.GenerateAsync(llmRequest, ct);
-            return ParsePlanResponse(response.Text);
+            var response = await _llm.GenerateWithRetryAsync(llmRequest, maxRetries: 2, ct);
+            return (ParsePlanResponse(response.Text), response.Text);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "계획 생성 실패");
-            return [intent.Description.Length > 0 ? intent.Description : message];
+            return ([intent.Description.Length > 0 ? intent.Description : message], null);
         }
     }
 
@@ -246,7 +326,17 @@ public sealed class IntentResolver
                 var contentStart = text.IndexOf('\n', fenceStart) + 1;
                 var fenceEnd = text.IndexOf("```", contentStart, StringComparison.Ordinal);
                 if (fenceEnd > contentStart)
+                {
                     jsonText = text[contentStart..fenceEnd].Trim();
+                }
+                else
+                {
+                    // 펜스가 닫히지 않은 경우 — 중괄호 추출로 fallback
+                    var braceStart = text.IndexOf('{');
+                    var braceEnd = text.LastIndexOf('}');
+                    if (braceStart >= 0 && braceEnd > braceStart)
+                        jsonText = text[braceStart..(braceEnd + 1)];
+                }
             }
             else
             {
@@ -314,4 +404,6 @@ public sealed class IntentResult
     public string? ToolName { get; set; }
     public double Confidence { get; set; }
     public string Description { get; set; } = "";
+    public string? RawLlmResponse { get; set; }
+    public bool FallbackUsed { get; set; }
 }

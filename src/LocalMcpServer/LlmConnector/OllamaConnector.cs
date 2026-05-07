@@ -36,14 +36,15 @@ public sealed class OllamaConnector
         var body = new OllamaChatRequest
         {
             Model = model,
-            Messages = [new OllamaChatMessage { Role = "user", Content = request.Prompt }],
+            Messages = BuildMessages(request),
             Stream = false,
             Options = new OllamaOptions
             {
                 Temperature = request.Options.Temperature,
                 NumPredict = request.Options.MaxTokens,
                 NumCtx = request.Options.NumCtx > 0 ? request.Options.NumCtx : 4096
-            }
+            },
+            Format = request.Options.ResponseFormat
         };
 
         var json = JsonSerializer.Serialize(body, OllamaJsonContext.Default.OllamaChatRequest);
@@ -76,6 +77,41 @@ public sealed class OllamaConnector
                 }
                 : null
         };
+    }
+
+    /// <summary>
+    /// SystemPrompt가 있으면 system + user 메시지로 분리, 없으면 user만.
+    /// </summary>
+    private static List<OllamaChatMessage> BuildMessages(LlmRequest request)
+    {
+        var messages = new List<OllamaChatMessage>();
+
+        if (!string.IsNullOrEmpty(request.SystemPrompt))
+        {
+            messages.Add(new OllamaChatMessage { Role = "system", Content = request.SystemPrompt });
+        }
+
+        messages.Add(new OllamaChatMessage { Role = "user", Content = request.Prompt });
+        return messages;
+    }
+
+    /// <summary>
+    /// GenerateAsync를 호출하되, 빈 응답이면 최대 maxRetries번 재시도한다.
+    /// </summary>
+    public async Task<LlmResponse> GenerateWithRetryAsync(LlmRequest request, int maxRetries = 2, CancellationToken ct = default)
+    {
+        for (var attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            var response = await GenerateAsync(request, ct);
+            if (!string.IsNullOrWhiteSpace(response.Text))
+                return response;
+
+            if (attempt < maxRetries)
+                _logger.LogWarning("Ollama 빈 응답 (시도 {Attempt}/{Max}), 재시도...", attempt + 1, maxRetries + 1);
+        }
+
+        _logger.LogWarning("Ollama 빈 응답 {Max}회 반복, 빈 응답 반환", maxRetries + 1);
+        return new LlmResponse { Text = string.Empty };
     }
 
     /// <summary>
@@ -112,6 +148,10 @@ internal sealed class OllamaChatRequest
 
     [JsonPropertyName("options")]
     public OllamaOptions? Options { get; set; }
+
+    [JsonPropertyName("format")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Format { get; set; }
 }
 
 internal sealed class OllamaChatMessage

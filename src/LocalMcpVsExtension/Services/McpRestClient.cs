@@ -265,6 +265,7 @@ namespace LocalMcpVsExtension.Services
         public string? ConversationId { get; set; }
         public string? ActiveFilePath { get; set; }
         public string? SolutionPath { get; set; }
+        public bool IntentAndPlanOnly { get; set; }
     }
 
     internal sealed class RunStartResponse

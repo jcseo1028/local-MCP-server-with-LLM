@@ -32,4 +32,10 @@ public interface IResourceCache
     /// 기존 인덱스를 교체하며 스레드 안전하다.
     /// </summary>
     Task ReindexAsync(string rootPath, CancellationToken ct = default);
+
+    /// <summary>
+    /// 코드 인덱스에서 프로젝트 전체 파일/심볼 구조를 요약 텍스트로 반환한다.
+    /// analyze_project_structure 도구가 사용한다.
+    /// </summary>
+    string GetProjectStructureSummary();
 }

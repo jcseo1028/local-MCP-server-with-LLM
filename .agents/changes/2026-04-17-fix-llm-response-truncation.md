@@ -46,6 +46,28 @@
 - `src/LocalMcpServer/ToolRegistry/RefactorCurrentCodeTool.cs`
 - `src/LocalMcpServer/McpServer/IntentResolver.cs`
 - `src/LocalMcpServer/prompts/run_summary.prompt.md`
+- `src/LocalMcpVsExtension/ToolWindows/SummaryToolWindowControl.cs`
+- `src/LocalMcpServer/McpServer/RunModels.cs`
+- `src/LocalMcpServer/McpServer/RunOrchestrator.cs`
+- `src/LocalMcpVsExtension/Services/McpRestClient.cs`
+- `.agents/contracts.md`
+- `.agents/modules.md`
+- `README.md`
+
+### VS Extension 채팅 UI 콘텐츠 잘림 수정
+
+| 위치 | 기존 설정 | 문제 | 변경 |
+|------|----------|------|------|
+| `RenderMessage()` FlowDocumentScrollViewer | MaxHeight=400, VerticalScroll=Disabled | 400px 초과 콘텐츠 잘림+스크롤 불가 | MaxHeight 제거, VerticalScroll=Auto |
+| `UpdateRunContent()` FlowDocumentScrollViewer | MaxHeight=400, VerticalScroll=Disabled | 위와 동일 | MaxHeight 제거, VerticalScroll=Auto |
+
+### Run API 의도/계획 검증 모드 추가
+
+| 위치 | 변경 |
+|------|------|
+| `ChatRunStartRequest` / `RunStartRequest` | `intentAndPlanOnly: boolean` 추가 |
+| `RunOrchestrator` | planning 완료 후 검증 모드면 후속 6단계 Skip + 즉시 Completed |
+| `README` / `.agents` 문서 | 검증 모드 계약 및 동작 반영 |
 
 ## 미결 항목
 

@@ -34,6 +34,7 @@ builder.Services.AddSingleton<RefactorCurrentCodeTool>();
 builder.Services.AddSingleton<FixCodeIssuesTool>();
 builder.Services.AddSingleton<SearchProjectCodeTool>();
 builder.Services.AddSingleton<SuggestFixFromErrorLogTool>();
+builder.Services.AddSingleton<AnalyzeProjectStructureTool>();
 builder.Services.AddSingleton<ToolRegistryService>(sp =>
 {
     var registry = new ToolRegistryService();
@@ -43,6 +44,7 @@ builder.Services.AddSingleton<ToolRegistryService>(sp =>
     registry.Register(sp.GetRequiredService<FixCodeIssuesTool>());
     registry.Register(sp.GetRequiredService<SearchProjectCodeTool>());
     registry.Register(sp.GetRequiredService<SuggestFixFromErrorLogTool>());
+    registry.Register(sp.GetRequiredService<AnalyzeProjectStructureTool>());
     return registry;
 });
 
@@ -52,6 +54,7 @@ builder.Services.AddSingleton<IntentResolver>();
 
 // --- Run Orchestration 모듈 (contracts.md §11, pipeline.md v2.1) ---
 builder.Services.AddSingleton<DocumentSearcher>();
+builder.Services.AddSingleton<RunLogger>();
 builder.Services.AddSingleton<RunOrchestrator>();
 
 // --- Resource Cache 모듈 (contracts.md §4, modules.md §4) ---

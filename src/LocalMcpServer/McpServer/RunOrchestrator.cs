@@ -1,5 +1,7 @@
+using LocalMcpServer.Configuration;
 using LocalMcpServer.ResourceCache;
 using LocalMcpServer.ToolRegistry;
+using Microsoft.Extensions.Options;
 
 namespace LocalMcpServer.McpServer;
 
@@ -16,6 +18,8 @@ public sealed class RunOrchestrator
     private readonly ToolRegistryService _registry;
     private readonly IResourceCache _cache;
     private readonly ILogger<RunOrchestrator> _logger;
+    private readonly RunLogger _runLogger;
+    private readonly ChatSection _chatConfig;
 
     public RunOrchestrator(
         IConversationStore store,
@@ -23,6 +27,8 @@ public sealed class RunOrchestrator
         DocumentSearcher docSearcher,
         ToolRegistryService registry,
         IResourceCache cache,
+        IOptions<ServerConfig> config,
+        RunLogger runLogger,
         ILogger<RunOrchestrator> logger)
     {
         _store = store;
@@ -30,6 +36,8 @@ public sealed class RunOrchestrator
         _docSearcher = docSearcher;
         _registry = registry;
         _cache = cache;
+        _chatConfig = config.Value.Chat;
+        _runLogger = runLogger;
         _logger = logger;
     }
 
@@ -49,7 +57,8 @@ public sealed class RunOrchestrator
             Language = req.Language,
             SelectionOnly = req.SelectionOnly,
             ActiveFilePath = req.ActiveFilePath,
-            SolutionPath = req.SolutionPath
+            SolutionPath = req.SolutionPath,
+            IntentAndPlanOnly = req.IntentAndPlanOnly || _chatConfig.IntentAndPlanOnly
         };
 
         _store.AddRun(run);
@@ -59,6 +68,8 @@ public sealed class RunOrchestrator
         {
             _ = _cache.ReindexAsync(req.SolutionPath);
         }
+
+        _runLogger.LogRunStart(run);
 
         _ = Task.Run(() => ExecutePipelineAsync(run));
 
@@ -130,12 +141,22 @@ public sealed class RunOrchestrator
             s1.Start();
             run.Intent = await _intent.AnalyzeIntentAsync(run.Message, run.Language, ct);
             s1.Complete($"tool={run.Intent.ToolName ?? "chat"}, confidence={run.Intent.Confidence:F2}");
+            _runLogger.LogIntentResult(run.RunId, run.Intent);
 
             // 2. 계획 수립
             var s2 = run.GetStage(StageIds.Planning);
             s2.Start();
-            run.PlanItems = await _intent.GeneratePlanAsync(run.Intent, run.Message, run.Code, run.Language, ct);
+            var planResult = await _intent.GeneratePlanAsync(run.Intent, run.Message, run.Code, run.Language, ct);
+            run.PlanItems = planResult.Items;
+            run.PlanRawLlmResponse = planResult.RawResponse;
             s2.Complete($"{run.PlanItems.Count}개 항목");
+            _runLogger.LogPlan(run.RunId, run.PlanItems, run.PlanRawLlmResponse);
+
+            if (run.IntentAndPlanOnly)
+            {
+                CompleteIntentAndPlanOnlyRun(run);
+                return;
+            }
 
             // 3. 컨텍스트 수집 — §8c 컨텍스트 검증
             var s3 = run.GetStage(StageIds.ContextCollection);
@@ -264,6 +285,39 @@ public sealed class RunOrchestrator
         }
     }
 
+    private void CompleteIntentAndPlanOnlyRun(RunData run)
+    {
+        run.GetStage(StageIds.ContextCollection).Skip("의도/계획 검증 모드");
+        run.GetStage(StageIds.DocumentSearch).Skip("의도/계획 검증 모드");
+        run.GetStage(StageIds.ProposalGeneration).Skip("의도/계획 검증 모드");
+        run.GetStage(StageIds.Approval).Skip("의도/계획 검증 모드");
+        run.GetStage(StageIds.Applying).Skip("의도/계획 검증 모드");
+        run.GetStage(StageIds.BuildTest).Skip("의도/계획 검증 모드");
+
+        var summaryStage = run.GetStage(StageIds.FinalSummary);
+        summaryStage.Start();
+
+        var toolName = run.Intent?.ToolName ?? "chat";
+        var description = string.IsNullOrWhiteSpace(run.Intent?.Description)
+            ? "설명 없음"
+            : run.Intent!.Description;
+        var planSummary = run.PlanItems.Count > 0
+            ? string.Join(" | ", run.PlanItems)
+            : "계획 항목 없음";
+
+        run.FinalSummary =
+            $"의도/계획 검증 완료\n" +
+            $"- tool: {toolName}\n" +
+            $"- description: {description}\n" +
+            $"- plans: {planSummary}";
+
+        summaryStage.Complete("의도/계획 검증 완료");
+        run.State = RunState.Completed;
+        _runLogger.LogFinalSummary(run.RunId, run);
+
+        _logger.LogInformation("Run {RunId} 의도/계획 검증 모드 완료", run.RunId);
+    }
+
     private async Task GenerateProposalAsync(RunData run, CancellationToken ct)
     {
         if (run.Intent is null)
@@ -285,6 +339,7 @@ public sealed class RunOrchestrator
 
                 var toolResult = await tool.ExecuteAsync(arguments, ct);
                 var resultText = toolResult.Content.FirstOrDefault()?.Text ?? "(결과 없음)";
+                _runLogger.LogToolExecution(run.RunId, run.Intent.ToolName, resultText);
 
                 if (IntentResolver.IsEditTool(run.Intent.ToolName) && run.Code is not null)
                 {
@@ -320,6 +375,7 @@ public sealed class RunOrchestrator
             var history = conversation?.FormatHistoryForPrompt() ?? "(없음)";
             var chatResult = await _intent.GenerateChatResponseAsync(
                 run.Message, run.Code, run.Language, history, ct);
+            _runLogger.LogToolExecution(run.RunId, "general_chat", chatResult);
 
             run.Proposal = new RunProposal
             {
@@ -372,6 +428,7 @@ public sealed class RunOrchestrator
         }
 
         run.State = RunState.Completed;
+        _runLogger.LogFinalSummary(run.RunId, run);
     }
 
     private static string? ExtractCodeFromResult(string result)

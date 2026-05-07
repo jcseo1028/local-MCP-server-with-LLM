@@ -499,4 +499,122 @@ public sealed class ResourceCacheService : IResourceCache
         // 단순 경로 포함 검사
         return filePath.Replace('\\', '/').Contains(scope.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <inheritdoc/>
+    public string GetProjectStructureSummary()
+    {
+        _indexLock.EnterReadLock();
+        try
+        {
+            if (_symbolIndex.Count == 0)
+                return "코드 인덱스가 비어 있습니다. CodeIndex.RootPath를 설정하거나 SolutionPath를 전달하세요.";
+
+            var sb = new System.Text.StringBuilder();
+            var rootDisplay = _currentIndexRoot ?? "unknown";
+            var rootName = Path.GetFileName(rootDisplay.TrimEnd('/', '\\'));
+
+            // ── 1. 디렉터리 트리 (파일 목록) ──
+            var allFiles = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var results in _symbolIndex.Values)
+                foreach (var r in results)
+                {
+                    var rel = _currentIndexRoot is not null
+                        ? Path.GetRelativePath(_currentIndexRoot, r.FilePath).Replace('\\', '/')
+                        : r.FilePath.Replace('\\', '/');
+                    allFiles.Add(rel);
+                }
+
+            sb.AppendLine($"# 프로젝트: {rootName}");
+            sb.AppendLine($"루트: {rootDisplay}");
+            sb.AppendLine($"인덱싱된 파일: {allFiles.Count}개, 심볼: {_symbolIndex.Count}개\n");
+
+            sb.AppendLine("## 디렉터리 구조");
+            var directories = allFiles
+                .Select(f => Path.GetDirectoryName(f)?.Replace('\\', '/') ?? "")
+                .Where(d => d.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(d => d, StringComparer.OrdinalIgnoreCase);
+            foreach (var dir in directories)
+            {
+                var filesInDir = allFiles.Where(f =>
+                    string.Equals(Path.GetDirectoryName(f)?.Replace('\\', '/'), dir, StringComparison.OrdinalIgnoreCase));
+                sb.AppendLine($"  {dir}/ ({filesInDir.Count()}개 파일)");
+            }
+            // 루트 파일
+            var rootFiles = allFiles.Where(f => !f.Contains('/'));
+            if (rootFiles.Any())
+                sb.AppendLine($"  (루트) ({rootFiles.Count()}개 파일)");
+            sb.AppendLine();
+
+            // ── 2. 파일별 타입 선언 (class/interface/struct/enum/record만) ──
+            var typeKeywords = new[] { "class ", "interface ", "struct ", "enum ", "record " };
+            var fileTypes = new SortedDictionary<string, List<(string symbol, string snippet)>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (symbol, results) in _symbolIndex)
+            {
+                foreach (var r in results)
+                {
+                    // 스니펫에서 타입 선언인지 판별
+                    var snippetFirstLine = r.Snippet.Split('\n')
+                        .Select(l => l.TrimStart())
+                        .FirstOrDefault(l => typeKeywords.Any(kw => l.Contains(kw, StringComparison.Ordinal)));
+
+                    if (snippetFirstLine is null) continue;
+
+                    var rel = _currentIndexRoot is not null
+                        ? Path.GetRelativePath(_currentIndexRoot, r.FilePath).Replace('\\', '/')
+                        : r.FilePath.Replace('\\', '/');
+
+                    if (!fileTypes.TryGetValue(rel, out var list))
+                    {
+                        list = [];
+                        fileTypes[rel] = list;
+                    }
+                    list.Add((symbol, snippetFirstLine.Trim()));
+                }
+            }
+
+            sb.AppendLine("## 파일별 주요 타입");
+            foreach (var (file, types) in fileTypes)
+            {
+                sb.AppendLine($"### {file}");
+                foreach (var (sym, snippet) in types.DistinctBy(t => t.symbol).OrderBy(t => t.symbol))
+                    sb.AppendLine($"  - **{sym}**: `{snippet}`");
+                sb.AppendLine();
+            }
+
+            // ── 3. 타입 간 관계 힌트 (상속/구현 패턴) ──
+            var inheritanceHints = new List<string>();
+            foreach (var (symbol, results) in _symbolIndex)
+            {
+                foreach (var r in results)
+                {
+                    foreach (var line in r.Snippet.Split('\n'))
+                    {
+                        var trimmed = line.Trim();
+                        // "class Foo : Bar" 또는 "class Foo : IBar, IBaz" 패턴
+                        if (trimmed.Contains(" : ") && typeKeywords.Any(kw => trimmed.Contains(kw, StringComparison.Ordinal)))
+                        {
+                            inheritanceHints.Add($"  - `{trimmed}`");
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (inheritanceHints.Count > 0)
+            {
+                sb.AppendLine("## 상속/구현 관계");
+                foreach (var hint in inheritanceHints.Distinct().OrderBy(h => h).Take(50))
+                    sb.AppendLine(hint);
+                sb.AppendLine();
+            }
+
+            return sb.ToString();
+        }
+        finally
+        {
+            _indexLock.ExitReadLock();
+        }
+    }
 }
