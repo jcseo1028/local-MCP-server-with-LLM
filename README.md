@@ -246,14 +246,6 @@ src/LocalMcpVsExtension/
 - **서버 측 Hunks 사전 계산**: MCP 서버가 proposal 생성 시 `DiffEngine.Compute()`로 hunks 사전 계산 → VSIX 재계산 중복 제거
 - **대용량 파일 토큰 초과 대응**: 파일당 8,000자 / 전체 32,000자 제한, 초과 시 비율 절단 + 프롬프트에 생략 표시
 
-**v2.3 추가 기능:**
-- **파일별 개별 승인/거부**: 멀티 파일 수정 시 각 파일 Expander 헤더에 체크박스 표시 — 체크 해제된 파일은 적용 제외
-- **파일 선택 UI**: 📁 버튼으로 현재 열린 파일 체크리스트 패널 토글 — 서버에 전송할 파일 직접 선택
-- **Atomic Rollback**: 멀티 파일 적용 시 어느 파일이든 실패하면 이미 적용된 전체 파일 원복 (all-or-nothing)
-- **[FILE:] 폴백 파싱**: LLM이 `### path.ext` / `**path.ext**` / `// File: path` 형식으로 출력했을 때도 파싱 가능
-- **ApplyResults 전송**: 파일별 적용 결과를 `ClientResultRequest.ApplyResults`에 담아 서버에 전송
-- **멀티 파일 컨텍스트 수집**: `IVsRunningDocumentTable`로 VS에서 열린 코드 파일 자동 수집 후 서버 전달
-
 **v2.1 추가 기능:**
 - **9단계 오케스트레이션**: 의도분석 → 계획수립 → 컨텍스트수집 → 문서검색 → 수정안생성 → 승인 → 적용 → 빌드/테스트 → 결과요약
 - **의도/계획 검증 모드**: `POST /api/chat/runs`에 `intentAndPlanOnly=true`를 주면 의도 분석과 계획 수립까지만 실행하고 즉시 완료

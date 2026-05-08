@@ -40,17 +40,30 @@ public sealed class SummarizeCurrentCodeTool : IMcpTool
 
     public async Task<ToolCallResult> ExecuteAsync(Dictionary<string, object?> arguments, CancellationToken ct = default)
     {
-        var code = GetStringArg(arguments, "code")
-            ?? throw new ArgumentException("code 인자가 필요합니다.");
-
+        var code = GetStringArg(arguments, "code") ?? "";
         var language = GetStringArg(arguments, "language") ?? "";
+        var filesContext = GetStringArg(arguments, "files_context") ?? "";
+
+        // files_context가 있으면 멀티 파일 모드: files_context를 코드 섹션으로 사용
+        string codeSection;
+        if (!string.IsNullOrWhiteSpace(filesContext))
+        {
+            codeSection = filesContext;
+        }
+        else if (!string.IsNullOrEmpty(code))
+        {
+            codeSection = $"{language} 코드:\n```{language}\n{code}\n```";
+        }
+        else
+        {
+            throw new ArgumentException("code 또는 files_context 인자가 필요합니다.");
+        }
 
         var prompt = await _promptLoader.LoadAndRenderAsync(
             Name,
             new Dictionary<string, string>
             {
-                ["code"] = code,
-                ["language"] = language
+                ["code_section"] = codeSection
             },
             ct);
 
