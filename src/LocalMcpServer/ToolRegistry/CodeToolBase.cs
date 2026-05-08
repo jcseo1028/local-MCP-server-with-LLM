@@ -37,12 +37,15 @@ public abstract class CodeToolBase : IMcpTool
 
         var language = GetStringArg(arguments, "language") ?? "";
 
+        var filesContext = GetStringArg(arguments, "files_context") ?? "";
+
         var prompt = await _promptLoader.LoadAndRenderAsync(
             Name,
             new Dictionary<string, string>
             {
                 ["code"] = code,
-                ["language"] = language
+                ["language"] = language,
+                ["files_context"] = filesContext
             },
             ct);
 

@@ -12,6 +12,7 @@ using Community.VisualStudio.Toolkit;
 using LocalMcpVsExtension.Services;
 using Microsoft.VisualStudio.PlatformUI;
 using Microsoft.VisualStudio.Shell;
+using Microsoft.VisualStudio.Shell.Interop;
 
 namespace LocalMcpVsExtension.ToolWindows
 {
@@ -47,6 +48,13 @@ namespace LocalMcpVsExtension.ToolWindows
         private readonly Button _btnHistory;
         private readonly List<ChatSession> _chatSessions = new List<ChatSession>();
         private const int MaxSessionHistory = 20;
+
+        // ── B-2: 파일 선택 UI ────────────────────────────────
+        private readonly Button _btnFileSelect;
+        private readonly Border _fileSelectBorder;
+        private readonly StackPanel _fileSelectInner;
+        /// <summary>사용자가 선택한 파일 경로 목록. 비어있으면 열린 파일 전체 사용.</summary>
+        private readonly HashSet<string> _selectedFilePaths = new HashSet<string>();
 
         public SummaryToolWindowControl()
         {
@@ -177,7 +185,53 @@ namespace LocalMcpVsExtension.ToolWindows
                 Margin = new Thickness(0, 4, 0, 0)
             };
             _chkIncludeCode.SetResourceReference(Control.ForegroundProperty, VsBrushes.ToolWindowTextKey);
+
+            // B-2: 파일 선택 버튼 행
+            var fileRow = new DockPanel { Margin = new Thickness(0, 2, 0, 0) };
+            _btnFileSelect = new Button
+            {
+                Content = "\uD83D\uDCC1 파일 선택",
+                Padding = new Thickness(6, 2, 6, 2),
+                FontSize = 11
+            };
+            _btnFileSelect.SetResourceReference(Control.BackgroundProperty, VsBrushes.ButtonFaceKey);
+            _btnFileSelect.SetResourceReference(Control.ForegroundProperty, VsBrushes.ButtonTextKey);
+            _btnFileSelect.SetResourceReference(Control.BorderBrushProperty, VsBrushes.ActiveBorderKey);
+            _btnFileSelect.Click += BtnFileSelect_Click;
+            DockPanel.SetDock(_btnFileSelect, Dock.Left);
+            fileRow.Children.Add(_btnFileSelect);
+            var _lblFileSelectHint = new TextBlock
+            {
+                Text = "  (모든 열린 파일 포함)",
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _lblFileSelectHint.SetResourceReference(TextBlock.ForegroundProperty, VsBrushes.GrayTextKey);
+            _lblFileSelectHint.Name = "FileSelectHint";
+            fileRow.Children.Add(_lblFileSelectHint);
+
+            // B-2: 파일 체크리스트 패널 (토글)
+            _fileSelectInner = new StackPanel { Margin = new Thickness(0, 2, 0, 2) };
+            _fileSelectBorder = new Border
+            {
+                Child = new ScrollViewer
+                {
+                    Content = _fileSelectInner,
+                    MaxHeight = 150,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+                },
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(4),
+                Margin = new Thickness(0, 2, 0, 2),
+                Visibility = Visibility.Collapsed
+            };
+            _fileSelectBorder.SetResourceReference(Border.BorderBrushProperty, VsBrushes.ActiveBorderKey);
+            _fileSelectBorder.SetResourceReference(Border.BackgroundProperty, VsBrushes.ToolWindowBackgroundKey);
+
             inputInner.Children.Add(_chkIncludeCode);
+            inputInner.Children.Add(fileRow);
+            inputInner.Children.Add(_fileSelectBorder);
 
             inputPanel.Children.Add(inputInner);
 
@@ -294,15 +348,119 @@ namespace LocalMcpVsExtension.ToolWindows
             });
         }
 
+#pragma warning disable VSSDK007
+        private void BtnFileSelect_Click(object sender, RoutedEventArgs e)
+        {
+            _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
+            {
+                await PopulateFileSelectPanelAsync();
+            });
+        }
+#pragma warning restore VSSDK007
+
+        private async Task PopulateFileSelectPanelAsync()
+        {
+            // 패널이 이미 열려있으면 닫기
+            if (_fileSelectBorder.Visibility == Visibility.Visible)
+            {
+                _fileSelectBorder.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            // 열린 코드 파일 전체 수집
+            var allFiles = await CollectOpenFilesAsync();
+            if (allFiles.Length == 0)
+            {
+                _txtStatus.Text = "열린 코드 파일이 없습니다.";
+                return;
+            }
+
+            _fileSelectInner.Children.Clear();
+
+            var headerRow = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
+            var lblHeader = new TextBlock { Text = "포함할 파일을 선택하세요:", FontWeight = FontWeights.Bold, FontSize = 11 };
+            lblHeader.SetResourceReference(TextBlock.ForegroundProperty, VsBrushes.ToolWindowTextKey);
+            DockPanel.SetDock(lblHeader, Dock.Left);
+            headerRow.Children.Add(lblHeader);
+
+            var btnAll = new Button { Content = "전체", FontSize = 10, Padding = new Thickness(4, 1, 4, 1), Margin = new Thickness(8, 0, 0, 0) };
+            btnAll.SetResourceReference(Control.BackgroundProperty, VsBrushes.ButtonFaceKey);
+            btnAll.SetResourceReference(Control.ForegroundProperty, VsBrushes.ButtonTextKey);
+            DockPanel.SetDock(btnAll, Dock.Right);
+            headerRow.Children.Add(btnAll);
+
+            var btnNone = new Button { Content = "없음", FontSize = 10, Padding = new Thickness(4, 1, 4, 1), Margin = new Thickness(4, 0, 0, 0) };
+            btnNone.SetResourceReference(Control.BackgroundProperty, VsBrushes.ButtonFaceKey);
+            btnNone.SetResourceReference(Control.ForegroundProperty, VsBrushes.ButtonTextKey);
+            DockPanel.SetDock(btnNone, Dock.Right);
+            headerRow.Children.Add(btnNone);
+
+            _fileSelectInner.Children.Add(headerRow);
+
+            var checkboxes = new List<(CheckBox cb, string path)>();
+
+            foreach (var f in allFiles)
+            {
+                var isChecked = _selectedFilePaths.Count == 0 || _selectedFilePaths.Contains(f.FilePath);
+                var cb = new CheckBox
+                {
+                    Content = System.IO.Path.GetFileName(f.FilePath),
+                    ToolTip = f.FilePath,
+                    IsChecked = isChecked,
+                    Margin = new Thickness(0, 1, 0, 1),
+                    FontSize = 11
+                };
+                cb.SetResourceReference(Control.ForegroundProperty, VsBrushes.ToolWindowTextKey);
+                cb.Checked += (s, ev) => { _selectedFilePaths.Add(f.FilePath); UpdateFileSelectHint(); };
+                cb.Unchecked += (s, ev) => { _selectedFilePaths.Remove(f.FilePath); UpdateFileSelectHint(); };
+                if (isChecked) _selectedFilePaths.Add(f.FilePath);
+                checkboxes.Add((cb, f.FilePath));
+                _fileSelectInner.Children.Add(cb);
+            }
+
+            btnAll.Click += (s, e) =>
+            {
+                foreach (var (cb, path) in checkboxes) { cb.IsChecked = true; _selectedFilePaths.Add(path); }
+                UpdateFileSelectHint();
+            };
+            btnNone.Click += (s, e) =>
+            {
+                foreach (var (cb, _) in checkboxes) cb.IsChecked = false;
+                _selectedFilePaths.Clear();
+                UpdateFileSelectHint();
+            };
+
+            _fileSelectBorder.Visibility = Visibility.Visible;
+            UpdateFileSelectHint();
+        }
+
+        private void UpdateFileSelectHint()
+        {
+            // _fileSelectBorder의 부모(inputInner) 에서 힌트 텍스트블록 찾기
+            var inputInner = _fileSelectBorder.Parent as StackPanel;
+            if (inputInner == null) return;
+            var hint = inputInner.Children.OfType<DockPanel>()
+                .SelectMany(dp => dp.Children.OfType<TextBlock>())
+                .FirstOrDefault(tb => tb.Name == "FileSelectHint");
+            if (hint == null) return;
+
+            if (_selectedFilePaths.Count == 0)
+                hint.Text = "  (모든 열린 파일 포함)";
+            else
+                hint.Text = $"  ({_selectedFilePaths.Count}개 선택됨)";
+        }
+
         private void TxtInput_PreviewKeyDown(object sender, KeyEventArgs e)
         {
             if (e.Key == Key.Enter && Keyboard.Modifiers != ModifierKeys.Shift)
             {
                 e.Handled = true;
+#pragma warning disable VSSDK007
                 _ = ThreadHelper.JoinableTaskFactory.RunAsync(async () =>
                 {
                     await SendMessageAsync();
                 });
+#pragma warning restore VSSDK007
             }
         }
 #pragma warning restore VSSDK007
@@ -361,6 +519,7 @@ namespace LocalMcpVsExtension.ToolWindows
 
                 // Run 시작
                 var solutionPath = await GetSolutionPathAsync();
+                var openFiles = await CollectOpenFilesAsync();
                 var startReq = new RunStartRequest
                 {
                     Message = message!,
@@ -369,7 +528,8 @@ namespace LocalMcpVsExtension.ToolWindows
                     SelectionOnly = selectionOnly,
                     ConversationId = _conversationId ?? "",
                     ActiveFilePath = activeFilePath,
-                    SolutionPath = solutionPath
+                    SolutionPath = solutionPath,
+                    Files = openFiles.Length > 0 ? openFiles : null
                 };
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -455,14 +615,31 @@ namespace LocalMcpVsExtension.ToolWindows
                                 var fileList = new System.Collections.Generic.List<FileChangeInfo>();
                                 foreach (var fc in snapshot.Proposal.Changes)
                                 {
+                                    // A-2: 서버 사전 계산 hunks가 있으면 HunkSelections 미리 초기화
+                                    List<HunkSelection> preHunks = null;
+                                    if (fc.Hunks != null && fc.Hunks.Length > 0)
+                                    {
+                                        preHunks = new List<HunkSelection>(fc.Hunks.Length);
+                                        for (int pi = 0; pi < fc.Hunks.Length; pi++)
+                                        {
+                                            var h = fc.Hunks[pi];
+                                            preHunks.Add(new HunkSelection
+                                            {
+                                                HunkIndex  = pi,
+                                                IsAccepted = true,
+                                                Hunk       = new DiffHunk(h.OriginalStart, h.OriginalEnd, h.NewText)
+                                            });
+                                        }
+                                    }
                                     fileList.Add(new FileChangeInfo
                                     {
-                                        FilePath = fc.FilePath,
-                                        Original = fc.Original,
-                                        Modified = fc.Modified,
+                                        FilePath      = fc.FilePath,
+                                        Original      = fc.Original,
+                                        Modified      = fc.Modified,
                                         SelectionOnly = fc.SelectionOnly,
-                                        IsNewFile = fc.IsNewFile,
-                                        Description = fc.Description
+                                        IsNewFile     = fc.IsNewFile,
+                                        Description   = fc.Description,
+                                        HunkSelections = preHunks
                                     });
                                 }
                                 runVm.CodeChange.Files = fileList;
@@ -878,30 +1055,75 @@ namespace LocalMcpVsExtension.ToolWindows
                 {
                     if (msg.CodeChange.IsMultiFile && msg.CodeChange.Files != null)
                     {
-                        // v2.2: 멀티 파일 적용
+                        // v2.2 / B-1 / B-3 / C-2: 파일별 선택 적용 + Atomic Rollback + ApplyResults 수집
+                        var perFileResults = new System.Collections.Generic.List<FileApplyResultDto>();
+                        // B-3: 롤백용 원본 내용 백업 (적용 성공한 파일들만 저장)
+                        var appliedBackups = new System.Collections.Generic.Dictionary<string, string>(
+                            StringComparer.OrdinalIgnoreCase);
                         var failedFiles = new System.Collections.Generic.List<string>();
+                        bool breakProcessing = false;
+
                         foreach (var fc in msg.CodeChange.Files)
                         {
+                            if (breakProcessing) break;
+
+                            // B-1: 사용자가 체크 해제한 파일은 건너뜀
+                            if (!fc.IsSelected)
+                            {
+                                perFileResults.Add(new FileApplyResultDto
+                                {
+                                    FilePath = fc.FilePath,
+                                    Applied = false,
+                                    Message = "사용자가 제외"
+                                });
+                                continue;
+                            }
+
                             try
                             {
+                                // B-3: 적용 전 원본 백업
+                                if (!fc.IsNewFile && System.IO.File.Exists(fc.FilePath))
+                                    appliedBackups[fc.FilePath] = System.IO.File.ReadAllText(fc.FilePath);
+
                                 if (fc.IsNewFile)
-                                {
                                     await CreateNewFileAsync(fc.FilePath, fc.Modified);
-                                }
                                 else
-                                {
                                     await ApplyHunksToFileAsync(fc);
-                                }
+
+                                perFileResults.Add(new FileApplyResultDto
+                                {
+                                    FilePath = fc.FilePath,
+                                    Applied = true
+                                });
                             }
                             catch (Exception fcEx)
                             {
+                                // B-3: 실패 시 지금까지 적용된 파일 모두 원복 (atomic rollback)
+                                foreach (var kvp in appliedBackups)
+                                {
+                                    try { System.IO.File.WriteAllText(kvp.Key, kvp.Value, System.Text.Encoding.UTF8); }
+                                    catch { /* 원복 실패는 무시 */ }
+                                }
+
+                                perFileResults.Add(new FileApplyResultDto
+                                {
+                                    FilePath = fc.FilePath,
+                                    Applied = false,
+                                    Message = fcEx.Message
+                                });
                                 failedFiles.Add($"{fc.FilePath}: {fcEx.Message}");
+                                breakProcessing = true;
                             }
                         }
+
+                        // C-2: ApplyResults 보존
+                        msg.CodeChange.ApplyResults = perFileResults;
+
                         if (failedFiles.Count > 0)
                         {
                             applyFailed = true;
-                            applyErrorMsg = "일부 파일 적용 실패: " + string.Join("; ", failedFiles);
+                            applyErrorMsg = $"적용 실패 — 롤백됨 ({appliedBackups.Count}개 파일 원복): "
+                                + string.Join("; ", failedFiles);
                         }
                     }
                     else
@@ -926,25 +1148,44 @@ namespace LocalMcpVsExtension.ToolWindows
                         }
 
                         // diff 계산 (라인 단위)
-                        var hunks = LineDiffEngine.Compute(originalText, modifiedCode);
+                        var allHunks = LineDiffEngine.Compute(originalText, modifiedCode).ToList();
 
-                        if (hunks.Count == 0)
+                        // A-1: HunkSelections이 있으면 선택된 hunk만 적용
+                        IEnumerable<DiffHunk> hunksToApply;
+                        var hunkSels = msg.CodeChange?.HunkSelections;
+                        if (hunkSels != null && hunkSels.Count == allHunks.Count)
+                            hunksToApply = allHunks.Where((h, i) => hunkSels[i].IsAccepted);
+                        else
+                            hunksToApply = allHunks;
+
+                        var filteredHunks = hunksToApply.ToList();
+                        if (filteredHunks.Count == 0)
                         {
-                            // 변경 없음 — 적용은 건너뛰되 승인 플로우는 계속
-                            _txtStatus.Text = "변경 없음: LLM 출력이 원본과 동일합니다.";
+                            _txtStatus.Text = "변경 없음: LLM 출력이 원본과 동일하거나 모든 hunk가 거부됐습니다.";
                         }
                         else
                         {
+                            // 라인 배열 레벨에서 재구성 후 전체 교체
+                            var origLines = SplitToLinesList(originalText);
+                            foreach (var hunk in System.Linq.Enumerable.OrderByDescending(
+                                filteredHunks, h => h.OriginalStart))
+                            {
+                                var newLines = SplitToLinesList(hunk.NewText);
+                                int removeCount = Math.Min(
+                                    hunk.OriginalEnd - hunk.OriginalStart,
+                                    origLines.Count - hunk.OriginalStart);
+                                if (removeCount > 0)
+                                    origLines.RemoveRange(hunk.OriginalStart, removeCount);
+                                origLines.InsertRange(hunk.OriginalStart, newLines);
+                            }
+                            var resultText = string.Concat(origLines);
+
                             using (var edit = docView.TextBuffer.CreateEdit())
                             {
-                                // 역순 적용으로 앞 hunk 적용이 뒤 hunk의 offset을 바꾸는 문제 방지
-                                foreach (var hunk in System.Linq.Enumerable.OrderByDescending(
-                                    hunks, h => h.OriginalStart))
-                                {
-                                    var span = GetLineSpanInSnapshot(snapshot, hunk.OriginalStart,
-                                                                     hunk.OriginalEnd, baseOffset);
-                                    edit.Replace(span, hunk.NewText);
-                                }
+                                if (msg.CodeChange.SelectionOnly && baseOffset >= 0)
+                                    edit.Replace(new Microsoft.VisualStudio.Text.Span(baseOffset, originalText.Length), resultText);
+                                else
+                                    edit.Replace(new Microsoft.VisualStudio.Text.Span(0, snapshot.Length), resultText);
                                 edit.Apply();
                             }
                         }
@@ -975,6 +1216,7 @@ namespace LocalMcpVsExtension.ToolWindows
                     {
                         Applied = false,
                         ApplyMessage = applyErrorMsg,
+                        ApplyResults = msg.CodeChange?.ApplyResults?.ToArray(),
                         Build = new ClientBuildResult { Attempted = false, Summary = "적용 실패로 빌드 생략" },
                         Tests = new ClientTestResult { Attempted = false, Summary = "적용 실패로 테스트 생략" }
                     };
@@ -985,7 +1227,11 @@ namespace LocalMcpVsExtension.ToolWindows
                     SetBusy(true);
 
                     // 빌드/테스트 실행
-                    clientResult = new ClientResultRequest { Applied = true };
+                    clientResult = new ClientResultRequest
+                    {
+                        Applied = true,
+                        ApplyResults = msg.CodeChange?.ApplyResults?.ToArray()
+                    };
                     var solutionPath = await GetSolutionPathAsync();
                     if (!string.IsNullOrEmpty(solutionPath))
                     {
@@ -1223,23 +1469,42 @@ namespace LocalMcpVsExtension.ToolWindows
                         IsExpanded = true,
                         Margin = new Thickness(0, 0, 0, 4)
                     };
-                    expander.Header = new TextBlock
+
+                    // B-1: 파일별 체크박스 헤더
+                    var headerPanel = new StackPanel { Orientation = Orientation.Horizontal };
+                    var fileCheckbox = new CheckBox
+                    {
+                        IsChecked = fc.IsSelected,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Margin = new Thickness(0, 0, 6, 0)
+                    };
+                    var capturedFc = fc;
+                    fileCheckbox.Checked += (s, e) => capturedFc.IsSelected = true;
+                    fileCheckbox.Unchecked += (s, e) => capturedFc.IsSelected = false;
+                    headerPanel.Children.Add(fileCheckbox);
+                    headerPanel.Children.Add(new TextBlock
                     {
                         Text = (fc.IsNewFile ? "[새 파일] " : "") + fc.FilePath,
                         FontWeight = FontWeights.Bold,
-                        Foreground = new SolidColorBrush(fg)
-                    };
+                        Foreground = new SolidColorBrush(fg),
+                        VerticalAlignment = VerticalAlignment.Center
+                    });
+                    expander.Header = headerPanel;
 
                     var fakeMsg = new ChatMessageViewModel
                     {
                         CodeChange = new CodeChangeInfo
                         {
-                            Original = fc.Original,
-                            Modified = fc.Modified,
-                            SelectionOnly = fc.SelectionOnly
+                            Original      = fc.Original,
+                            Modified      = fc.Modified,
+                            SelectionOnly = fc.SelectionOnly,
+                            // A-2: 서버 사전 계산 hunks 전달 (null이면 CreateSingleFileDiffView 내부에서 계산)
+                            HunkSelections = fc.HunkSelections
                         }
                     };
                     expander.Content = CreateSingleFileDiffView(fakeMsg, fg, bg, isDark);
+                    // A-2/A-1 버그 수정: 멀티파일에서 fakeMsg HunkSelections → fc.HunkSelections 동기화
+                    fc.HunkSelections = fakeMsg.CodeChange?.HunkSelections;
                     container.Children.Add(expander);
                 }
                 return container;
@@ -1250,90 +1515,167 @@ namespace LocalMcpVsExtension.ToolWindows
 
         private UIElement CreateSingleFileDiffView(ChatMessageViewModel msg, Color fg, Color bg, bool isDark)
         {
-            var diffGrid = new Grid { Margin = new Thickness(0, 8, 0, 4) };
-            diffGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            diffGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(4) });
-            diffGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
+            var original = msg.CodeChange?.Original ?? "";
+            var modified = msg.CodeChange?.Modified ?? "";
             var monoFont = new FontFamily("Consolas, Courier New, monospace");
-            var codeBg = new SolidColorBrush(isDark
-                ? Color.FromRgb(30, 30, 34)
-                : Color.FromRgb(250, 250, 250));
 
-            // 원본 (좌측)
-            var originalPanel = new StackPanel();
-            originalPanel.Children.Add(new TextBlock
+            if (string.IsNullOrEmpty(original) && string.IsNullOrEmpty(modified))
             {
-                Text = "\u25C0 원본",
-                FontWeight = FontWeights.Bold,
-                Foreground = new SolidColorBrush(fg),
+                var tb = new TextBlock { Text = "(코드 없음)", FontFamily = monoFont };
+                tb.SetResourceReference(TextBlock.ForegroundProperty, VsBrushes.ToolWindowTextKey);
+                return tb;
+            }
+
+            // A-2: 서버 사전 계산 hunks가 있으면 재계산 생략
+            List<DiffHunk> hunks;
+            if (msg.CodeChange?.HunkSelections != null && msg.CodeChange.HunkSelections.Count > 0)
+            {
+                hunks = msg.CodeChange.HunkSelections.Select(hs => hs.Hunk).ToList();
+            }
+            else
+            {
+                hunks = LineDiffEngine.Compute(original, modified).ToList();
+                // A-1: HunkSelections 초기화
+                if (msg.CodeChange != null && hunks.Count > 0)
+                {
+                    msg.CodeChange.HunkSelections = hunks.Select((h, i) =>
+                        new HunkSelection { HunkIndex = i, IsAccepted = true, Hunk = h }).ToList();
+                }
+            }
+
+            var origLines = SplitDisplayLines(original);
+            var contentPanel = new StackPanel();
+
+            if (hunks.Count == 0)
+            {
+                var noChangeTb = new TextBlock { Text = "변경 없음 — 원본과 동일합니다.", FontSize = 11, Margin = new Thickness(4) };
+                noChangeTb.SetResourceReference(TextBlock.ForegroundProperty, VsBrushes.ToolWindowTextKey);
+                contentPanel.Children.Add(noChangeTb);
+                return contentPanel;
+            }
+
+            // 요약 헤더
+            int totalAdded = hunks.Sum(h => SplitDisplayLines(h.NewText).Length);
+            int totalDeleted = hunks.Sum(h => h.OriginalEnd - h.OriginalStart);
+            var summary = new TextBlock
+            {
+                Text = $"변경: {hunks.Count}개 hunk  +{totalAdded} / -{totalDeleted} 라인",
+                FontSize = 11,
                 Margin = new Thickness(0, 0, 0, 4)
-            });
-            var originalBox = new TextBox
+            };
+            summary.SetResourceReference(TextBlock.ForegroundProperty, VsBrushes.ToolWindowTextKey);
+            contentPanel.Children.Add(summary);
+
+            // A-3 색상
+            const int CtxLines = 3;
+            var codeBg    = new SolidColorBrush(isDark ? Color.FromRgb(22, 22, 26)  : Color.FromRgb(252, 252, 252));
+            var deletedBg = new SolidColorBrush(isDark ? Color.FromRgb(80, 18, 18)  : Color.FromRgb(255, 214, 214));
+            var addedBg   = new SolidColorBrush(isDark ? Color.FromRgb(18, 58, 18)  : Color.FromRgb(214, 255, 214));
+            var hunkHeaderBg = new SolidColorBrush(isDark ? Color.FromRgb(30, 40, 55) : Color.FromRgb(218, 232, 252));
+            var borderBrush  = new SolidColorBrush(isDark ? Color.FromRgb(55, 55, 65) : Color.FromRgb(200, 200, 210));
+
+            for (int hi = 0; hi < hunks.Count; hi++)
             {
-                Text = msg.CodeChange?.Original ?? "",
-                IsReadOnly = true,
-                FontFamily = monoFont,
+                var hunk = hunks[hi];
+                var sel  = msg.CodeChange?.HunkSelections?.Count > hi
+                    ? msg.CodeChange.HunkSelections[hi] : null;
+
+                int addedCnt   = SplitDisplayLines(hunk.NewText).Length;
+                int deletedCnt = hunk.OriginalEnd - hunk.OriginalStart;
+
+                // ── A-1: hunk 헤더 + 체크박스 ─────────────────
+                var hunkHeader = new Border
+                {
+                    Background = hunkHeaderBg,
+                    Padding = new Thickness(6, 3, 6, 3),
+                    Margin = new Thickness(0, hi == 0 ? 0 : 8, 0, 0),
+                    BorderBrush = borderBrush,
+                    BorderThickness = new Thickness(1, 1, 1, 0)
+                };
+                var headerRow = new StackPanel { Orientation = Orientation.Horizontal };
+
+                var hunkCb = new CheckBox
+                {
+                    IsChecked = true,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 0, 6, 0)
+                };
+                hunkCb.SetResourceReference(Control.ForegroundProperty, VsBrushes.ToolWindowTextKey);
+                if (sel != null)
+                {
+                    hunkCb.Checked   += (s, e) => sel.IsAccepted = true;
+                    hunkCb.Unchecked += (s, e) => sel.IsAccepted = false;
+                }
+                headerRow.Children.Add(hunkCb);
+
+                var hunkLabel = new TextBlock
+                {
+                    Text = $"Hunk {hi + 1}  @@ -{hunk.OriginalStart + 1},{deletedCnt} +{hunk.OriginalStart + 1},{addedCnt} @@",
+                    FontFamily = monoFont,
+                    FontSize = 11,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                hunkLabel.SetResourceReference(TextBlock.ForegroundProperty, VsBrushes.ToolWindowTextKey);
+                headerRow.Children.Add(hunkLabel);
+                hunkHeader.Child = headerRow;
+                contentPanel.Children.Add(hunkHeader);
+
+                // ── A-3: 컬러 라인 패널 ───────────────────────
+                var linesPanel = new StackPanel { Background = codeBg };
+
+                // 컨텍스트 앞
+                int ctxStart = Math.Max(0, hunk.OriginalStart - CtxLines);
+                for (int i = ctxStart; i < hunk.OriginalStart && i < origLines.Length; i++)
+                    linesPanel.Children.Add(MakeDiffLineTb(" " + origLines[i], codeBg, fg, monoFont));
+
+                // 삭제 라인 (빨간)
+                for (int i = hunk.OriginalStart; i < hunk.OriginalEnd && i < origLines.Length; i++)
+                    linesPanel.Children.Add(MakeDiffLineTb("-" + origLines[i], deletedBg, fg, monoFont));
+
+                // 추가 라인 (초록)
+                foreach (var al in SplitDisplayLines(hunk.NewText))
+                    linesPanel.Children.Add(MakeDiffLineTb("+" + al, addedBg, fg, monoFont));
+
+                // 컨텍스트 뒤
+                int ctxEnd = Math.Min(origLines.Length, hunk.OriginalEnd + CtxLines);
+                for (int i = hunk.OriginalEnd; i < ctxEnd; i++)
+                    linesPanel.Children.Add(MakeDiffLineTb(" " + origLines[i], codeBg, fg, monoFont));
+
+                contentPanel.Children.Add(new Border
+                {
+                    BorderThickness = new Thickness(1, 0, 1, 1),
+                    BorderBrush = borderBrush,
+                    Child = linesPanel
+                });
+            }
+
+            return new ScrollViewer
+            {
+                Content = contentPanel,
+                MaxHeight = 420,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto
+            };
+        }
+
+        private static TextBlock MakeDiffLineTb(string text, SolidColorBrush bgBrush, Color fg, FontFamily font)
+        {
+            return new TextBlock
+            {
+                Text = text.TrimEnd('\r', '\n'),
+                FontFamily = font,
                 FontSize = 11,
                 TextWrapping = TextWrapping.NoWrap,
-                AcceptsReturn = true,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-                MaxHeight = 250,
-                Background = codeBg,
-                Foreground = new SolidColorBrush(fg),
-                BorderThickness = new Thickness(1),
-                Padding = new Thickness(4)
+                Padding = new Thickness(4, 1, 4, 1),
+                Background = bgBrush,
+                Foreground = new SolidColorBrush(fg)
             };
-            originalBox.SetResourceReference(Control.BorderBrushProperty, VsBrushes.ActiveBorderKey);
-            originalPanel.Children.Add(originalBox);
-            Grid.SetColumn(originalPanel, 0);
-            diffGrid.Children.Add(originalPanel);
+        }
 
-            // 구분선
-            var separator = new Border
-            {
-                Width = 2,
-                Background = new SolidColorBrush(isDark
-                    ? Color.FromRgb(60, 60, 65)
-                    : Color.FromRgb(200, 200, 200))
-            };
-            Grid.SetColumn(separator, 1);
-            diffGrid.Children.Add(separator);
-
-            // 변경 (우측)
-            var modifiedPanel = new StackPanel();
-            modifiedPanel.Children.Add(new TextBlock
-            {
-                Text = "\u25B6 변경",
-                FontWeight = FontWeights.Bold,
-                Foreground = new SolidColorBrush(isDark
-                    ? Color.FromRgb(78, 201, 176)
-                    : Color.FromRgb(0, 128, 0)),
-                Margin = new Thickness(0, 0, 0, 4)
-            });
-            var modifiedBox = new TextBox
-            {
-                Text = msg.CodeChange?.Modified ?? "",
-                IsReadOnly = true,
-                FontFamily = monoFont,
-                FontSize = 11,
-                TextWrapping = TextWrapping.NoWrap,
-                AcceptsReturn = true,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-                MaxHeight = 250,
-                Background = codeBg,
-                Foreground = new SolidColorBrush(fg),
-                BorderThickness = new Thickness(1),
-                Padding = new Thickness(4)
-            };
-            modifiedBox.SetResourceReference(Control.BorderBrushProperty, VsBrushes.ActiveBorderKey);
-            modifiedPanel.Children.Add(modifiedBox);
-            Grid.SetColumn(modifiedPanel, 2);
-            diffGrid.Children.Add(modifiedPanel);
-
-            return diffGrid;
+        private static string[] SplitDisplayLines(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return Array.Empty<string>();
+            return text.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
         }
 
         // ── 확인/거부 버튼 ───────────────────────────────────────
@@ -1471,72 +1813,79 @@ namespace LocalMcpVsExtension.ToolWindows
             var modifiedCode = NormalizeNewlines(fc.Modified, snapshot);
             modifiedCode = NormalizeIndentation(modifiedCode, snapshot);
 
-            var originalText = fc.SelectionOnly
-                ? NormalizeNewlines(fc.Original ?? string.Empty, snapshot)
-                : snapshot.GetText();
-
-            int baseOffset = 0;
+            string originalText;
+            int selectionOffset = -1;
             if (fc.SelectionOnly && !string.IsNullOrEmpty(fc.Original))
             {
+                originalText = NormalizeNewlines(fc.Original!, snapshot);
                 var fullText = snapshot.GetText();
-                baseOffset = fullText.IndexOf(originalText, StringComparison.Ordinal);
-                if (baseOffset < 0)
+                selectionOffset = fullText.IndexOf(originalText, StringComparison.Ordinal);
+                if (selectionOffset < 0)
                     throw new InvalidOperationException("원본 텍스트 매칭 실패");
             }
+            else
+            {
+                originalText = snapshot.GetText();
+            }
 
-            var hunks = LineDiffEngine.Compute(originalText, modifiedCode);
-            if (hunks.Count == 0) return;
+            var allHunks = LineDiffEngine.Compute(originalText, modifiedCode).ToList();
+
+            // A-1: 파일별 HunkSelections이 있으면 선택된 hunk만 적용
+            List<DiffHunk> hunksToApply;
+            if (fc.HunkSelections != null && fc.HunkSelections.Count == allHunks.Count)
+                hunksToApply = allHunks.Where((h, i) => fc.HunkSelections[i].IsAccepted).ToList();
+            else
+                hunksToApply = allHunks;
+
+            if (hunksToApply.Count == 0) return;
+
+            // LineDiffEngine과 동일한 방식으로 라인 분할 (각 라인에 \n 포함)
+            var origLines = SplitToLinesList(originalText);
+
+            // 역순으로 적용하여 앞쪽 라인 인덱스를 보존
+            foreach (var hunk in System.Linq.Enumerable.OrderByDescending(hunksToApply, h => h.OriginalStart))
+            {
+                var newLines = SplitToLinesList(hunk.NewText);
+                int removeCount = Math.Min(
+                    hunk.OriginalEnd - hunk.OriginalStart,
+                    origLines.Count - hunk.OriginalStart);
+                if (removeCount > 0)
+                    origLines.RemoveRange(hunk.OriginalStart, removeCount);
+                origLines.InsertRange(hunk.OriginalStart, newLines);
+            }
+
+            var resultText = string.Concat(origLines);
 
             using (var edit = docView.TextBuffer.CreateEdit())
             {
-                foreach (var hunk in System.Linq.Enumerable.OrderByDescending(hunks, h => h.OriginalStart))
-                {
-                    var span = GetLineSpanInSnapshot(snapshot, hunk.OriginalStart, hunk.OriginalEnd, baseOffset);
-                    edit.Replace(span, hunk.NewText);
-                }
+                if (selectionOffset >= 0)
+                    edit.Replace(new Microsoft.VisualStudio.Text.Span(selectionOffset, originalText.Length), resultText);
+                else
+                    edit.Replace(new Microsoft.VisualStudio.Text.Span(0, snapshot.Length), resultText);
                 edit.Apply();
             }
         }
 
         /// <summary>
-        /// snapshot 내에서 baseOffset(문자 위치)을 기준으로
-        /// startLine~endLine(0-based, exclusive) 범위의 Span을 반환한다.
+        /// LineDiffEngine.SplitLines와 동일한 방식으로 텍스트를 라인 목록으로 분할한다.
+        /// 각 라인은 줄바꿈 문자(\n)를 포함하며, 마지막 라인에 \n이 없으면 그대로 포함한다.
         /// </summary>
-        private static Microsoft.VisualStudio.Text.Span GetLineSpanInSnapshot(
-            Microsoft.VisualStudio.Text.ITextSnapshot snapshot,
-            int startLine, int endLine, int baseOffset)
+        private static List<string> SplitToLinesList(string text)
         {
-            // baseOffset 이 가리키는 문자 위치를 실제 라인 번호로 변환
-            int baseLine = snapshot.GetLineNumberFromPosition(baseOffset);
-
-            int absStart = baseLine + startLine;
-            int absEnd   = baseLine + endLine;
-
-            // 범위 클램핑
-            absStart = Math.Max(0, Math.Min(absStart, snapshot.LineCount - 1));
-
-            var startLineObj = snapshot.GetLineFromLineNumber(absStart);
-
-            if (absEnd <= absStart)
+            var lines = new List<string>();
+            if (string.IsNullOrEmpty(text)) return lines;
+            int start = 0;
+            for (int i = 0; i < text.Length; i++)
             {
-                // 순수 삽입: 라인 시작 위치에 길이 0 span
-                return new Microsoft.VisualStudio.Text.Span(startLineObj.Start.Position, 0);
+                if (text[i] == '\n')
+                {
+                    lines.Add(text.Substring(start, i - start + 1));
+                    start = i + 1;
+                }
             }
-
-            absEnd = Math.Min(absEnd, snapshot.LineCount);
-            int endPosition;
-            if (absEnd >= snapshot.LineCount)
-            {
-                endPosition = snapshot.Length;
-            }
-            else
-            {
-                var endLineObj = snapshot.GetLineFromLineNumber(absEnd);
-                endPosition = endLineObj.Start.Position;
-            }
-
-            return Microsoft.VisualStudio.Text.Span.FromBounds(
-                startLineObj.Start.Position, endPosition);
+            if (start < text.Length)
+                lines.Add(text.Substring(start));
+            return lines;
         }
 
         // ── 코드 정규화 유틸리티 ─────────────────────────────────
@@ -1746,6 +2095,75 @@ namespace LocalMcpVsExtension.ToolWindows
             foreach (var session in _chatSessions)
                 _cmbHistory.Items.Add(session);
         }
+
+        // ── 열린 파일 수집 ───────────────────────────────────────
+
+        /// <summary>
+        /// VS 편집기에서 현재 열려 있는 코드 파일들을 수집하여 RunFileContextDto 배열로 반환한다.
+        /// IVsRunningDocumentTable을 통해 열린 문서 목록을 열거한다.
+        /// </summary>
+        private async Task<RunFileContextDto[]> CollectOpenFilesAsync()
+        {
+            try
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+                var rdt = Microsoft.VisualStudio.Shell.Package.GetGlobalService(typeof(SVsRunningDocumentTable))
+                          as IVsRunningDocumentTable;
+                if (rdt == null) return Array.Empty<RunFileContextDto>();
+
+                rdt.GetRunningDocumentsEnum(out var enumerator);
+                var cookies = new uint[32];
+                var files = new List<RunFileContextDto>();
+
+                int hr;
+                do
+                {
+                    hr = enumerator.Next((uint)cookies.Length, cookies, out var fetched);
+                    if (fetched == 0) break;
+
+                    for (uint i = 0; i < fetched; i++)
+                    {
+                        rdt.GetDocumentInfo(cookies[i], out _, out _, out _,
+                            out string moniker, out _, out _, out _);
+
+                        if (string.IsNullOrEmpty(moniker) || !System.IO.File.Exists(moniker))
+                            continue;
+
+                        var ext = System.IO.Path.GetExtension(moniker).ToLowerInvariant();
+                        if (!IsCodeFileExtension(ext)) continue;
+
+                        try
+                        {
+                            var content = System.IO.File.ReadAllText(moniker);
+                            files.Add(new RunFileContextDto
+                            {
+                                FilePath = moniker,
+                                Code = content,
+                                Language = LanguageDetector.FromFilePath(moniker)
+                            });
+                        }
+                        catch { /* 읽기 불가 파일은 무시 */ }
+                    }
+                } while (hr == Microsoft.VisualStudio.VSConstants.S_OK);
+
+                // B-2: 사용자가 명시적으로 파일을 선택했으면 필터링
+                if (_selectedFilePaths.Count > 0)
+                    files = files.Where(f => _selectedFilePaths.Contains(f.FilePath)).ToList();
+
+                return files.ToArray();
+            }
+            catch
+            {
+                return Array.Empty<RunFileContextDto>();
+            }
+        }
+
+        private static bool IsCodeFileExtension(string ext) =>
+            ext is ".cs" or ".vb" or ".fs" or ".ts" or ".tsx" or ".js" or ".jsx"
+                or ".py" or ".java" or ".cpp" or ".c" or ".h" or ".go" or ".rs"
+                or ".xaml" or ".html" or ".css" or ".json" or ".yaml" or ".yml"
+                or ".md" or ".sql";
 
         // ── 유틸리티 ─────────────────────────────────────────────
 

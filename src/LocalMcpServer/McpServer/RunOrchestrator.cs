@@ -335,7 +335,8 @@ public sealed class RunOrchestrator
                 var arguments = new Dictionary<string, object?>
                 {
                     ["code"] = run.Code ?? "",
-                    ["language"] = run.Language ?? ""
+                    ["language"] = run.Language ?? "",
+                    ["files_context"] = BuildFilesContext(run)
                 };
 
                 var toolResult = await tool.ExecuteAsync(arguments, ct);
@@ -448,10 +449,90 @@ public sealed class RunOrchestrator
     }
 
     /// <summary>
+    /// run.Files가 있을 때 LLM 프롬프트에 삽입할 멀티 파일 컨텍스트 문자열을 빌드한다.
+    /// Files가 없거나 비어있으면 빈 문자열을 반환한다 (단건 모드 시 {{files_context}} 자리가 빈 문자열로 치환됨).
+    /// </summary>
+    // B-5: 파일별/전체 최대 문자 수 제한 (토큰 초과 대응)
+    private const int MaxPerFileChars  = 8_000;   // ≈2000 tokens/file
+    private const int MaxTotalChars    = 32_000;  // ≈8000 tokens total
+
+    private static string BuildFilesContext(RunData run)
+    {
+        if (run.Files == null || run.Files.Count == 0)
+            return "";
+
+        // B-5: 파일별 개별 제한 적용 후 전체 총량 재확인
+        var fileContents = run.Files.Select(f =>
+        {
+            var code = f.SelectedCode ?? f.Code;
+            bool truncated = false;
+            if (code.Length > MaxPerFileChars)
+            {
+                code = code[..MaxPerFileChars];
+                truncated = true;
+            }
+            return (f, code, truncated);
+        }).ToList();
+
+        int totalChars = fileContents.Sum(x => x.code.Length);
+        if (totalChars > MaxTotalChars)
+        {
+            // 전체 초과 시 파일별 비율 분배
+            double ratio = (double)MaxTotalChars / totalChars;
+            fileContents = fileContents.Select(x =>
+            {
+                int limit = Math.Max(200, (int)(x.code.Length * ratio));
+                if (x.code.Length > limit)
+                    return (x.f, x.code[..limit], true);
+                return x;
+            }).ToList();
+        }
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine();
+        sb.AppendLine("## 멀티 파일 수정 모드");
+        sb.AppendLine();
+        sb.AppendLine("여러 파일을 수정해야 하는 경우, 각 파일의 **전체 수정 코드**를 아래 형식으로 감싸서 반환한다:");
+        sb.AppendLine();
+        sb.AppendLine("[FILE: 파일경로]");
+        sb.AppendLine("수정된 전체 코드");
+        sb.AppendLine("[/FILE]");
+        sb.AppendLine();
+        sb.AppendLine("수정이 필요 없는 파일은 블록에 포함하지 않는다.");
+        sb.AppendLine();
+        sb.AppendLine("### 제공된 파일 목록:");
+        sb.AppendLine();
+        foreach (var (f, code, truncated) in fileContents)
+        {
+            sb.AppendLine($"[FILE: {f.FilePath}]");
+            sb.AppendLine($"```{f.Language ?? ""}");
+            sb.AppendLine(code);
+            if (truncated) sb.AppendLine("// ... (이하 생략 — 토큰 제한으로 잘림)");
+            sb.AppendLine("```");
+            sb.AppendLine("[/FILE]");
+            sb.AppendLine();
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// LLM 응답에서 [FILE: 경로]...[/FILE] 블록을 파싱하여 FileChange 목록을 반환한다.
+    /// 1차: 표준 [FILE:]...[/FILE] 패턴 / 2차 폴백: ### 파일경로 + 코드 펜스 패턴.
     /// 블록이 없으면 빈 목록을 반환한다 (단건 폴백).
     /// </summary>
     private static List<FileChange> ParseFileBlocks(string llmOutput, RunData run)
+    {
+        // 1차: 표준 패턴 [FILE: path]...[/FILE]
+        var result = ParseFileBlocksStandard(llmOutput, run);
+        if (result.Count > 0) return result;
+
+        // 2차 폴백: ### path.ext 또는 **path.ext** 마크다운 헤딩 + 코드 펜스
+        result = ParseFileBlocksMarkdownHeading(llmOutput, run);
+        return result;
+    }
+
+    private static List<FileChange> ParseFileBlocksStandard(string llmOutput, RunData run)
     {
         var result = new List<FileChange>();
         var pattern = new System.Text.RegularExpressions.Regex(
@@ -464,38 +545,85 @@ public sealed class RunOrchestrator
             var filePath = m.Groups["path"].Value.Trim();
             var modifiedCode = m.Groups["code"].Value.Trim();
 
-            // 코드 펜스 제거
             var extracted = ExtractCodeFromResult(modifiedCode);
             if (extracted != null) modifiedCode = extracted;
 
-            // 원본코드: run.Files에서 일치하는 파일 찾기, 없으면 단일파일 Code 사용
-            string originalCode = run.Code ?? "";
-            bool selectionOnly = run.SelectionOnly;
-            if (run.Files != null)
-            {
-                var match = run.Files.Find(f =>
-                    f.FilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase) ||
-                    System.IO.Path.GetFileName(f.FilePath).Equals(
-                        System.IO.Path.GetFileName(filePath), StringComparison.OrdinalIgnoreCase));
-                if (match != null)
-                {
-                    originalCode = match.SelectedCode ?? match.Code;
-                    selectionOnly = match.SelectionOnly;
-                }
-            }
-
-            result.Add(new FileChange
-            {
-                FilePath = filePath,
-                Original = originalCode,
-                Modified = modifiedCode,
-                SelectionOnly = selectionOnly,
-                IsNewFile = string.IsNullOrEmpty(originalCode),
-                Description = null
-            });
+            result.Add(BuildFileChange(filePath, modifiedCode, run));
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// B-4 폴백: LLM이 [FILE:] 블록 대신 마크다운 헤딩 형식으로 파일 경로를 출력했을 때 파싱한다.
+    /// 지원 패턴:
+    ///   ### path/to/File.cs          (헤딩 + 코드 펜스)
+    ///   **path/to/File.cs**          (볼드 + 코드 펜스)
+    ///   // File: path/to/File.cs     (주석 스타일)
+    /// </summary>
+    private static List<FileChange> ParseFileBlocksMarkdownHeading(string llmOutput, RunData run)
+    {
+        var result = new List<FileChange>();
+
+        // 파일 경로처럼 보이는 마크다운 구분자 → 뒤에 오는 코드 펜스를 연결
+        var pattern = new System.Text.RegularExpressions.Regex(
+            @"(?:#{1,4}\s+|(?:\*\*)|//\s*[Ff]ile:\s*)" +  // 헤딩/볼드/주석
+            @"(?<path>[\w./\\-]+\.\w{1,6})" +               // 파일경로 (확장자 필수)
+            @"(?:\*\*)?\s*\n+" +                             // 헤딩 끝
+            @"```(?:\w*)\n(?<code>[\s\S]*?)```",            // 코드 펜스
+            System.Text.RegularExpressions.RegexOptions.Multiline);
+
+        var matches = pattern.Matches(llmOutput);
+        foreach (System.Text.RegularExpressions.Match m in matches)
+        {
+            var filePath = m.Groups["path"].Value.Trim();
+            var modifiedCode = m.Groups["code"].Value.TrimEnd();
+            if (string.IsNullOrWhiteSpace(filePath) || string.IsNullOrWhiteSpace(modifiedCode))
+                continue;
+
+            result.Add(BuildFileChange(filePath, modifiedCode, run));
+        }
+
+        return result;
+    }
+
+    private static FileChange BuildFileChange(string filePath, string modifiedCode, RunData run)
+    {
+        string originalCode = run.Code ?? "";
+        bool selectionOnly = run.SelectionOnly;
+
+        if (run.Files != null)
+        {
+            var match = run.Files.Find(f =>
+                f.FilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase) ||
+                System.IO.Path.GetFileName(f.FilePath).Equals(
+                    System.IO.Path.GetFileName(filePath), StringComparison.OrdinalIgnoreCase));
+            if (match != null)
+            {
+                originalCode = match.SelectedCode ?? match.Code;
+                selectionOnly = match.SelectionOnly;
+            }
+        }
+
+        // A-2: 서버 측 hunks 사전 계산 — VSIX 재계산 중복 제거
+        DiffHunkInfo[]? hunks = null;
+        if (!string.IsNullOrEmpty(originalCode) && !string.IsNullOrEmpty(modifiedCode))
+        {
+            var computed = DiffEngine.Compute(originalCode, modifiedCode);
+            if (computed.Count > 0)
+                hunks = [.. computed];
+        }
+
+        return new FileChange
+        {
+            FilePath = filePath,
+            Original = originalCode,
+            Modified = modifiedCode,
+            SelectionOnly = selectionOnly,
+            IsNewFile = string.IsNullOrEmpty(originalCode),
+            Description = null,
+            Hunks = hunks
+        };
     }
 
     private static string? ExtractCodeFromResult(string result)

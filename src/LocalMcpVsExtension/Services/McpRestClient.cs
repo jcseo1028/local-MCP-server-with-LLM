@@ -330,6 +330,17 @@ namespace LocalMcpVsExtension.Services
         public bool SelectionOnly { get; set; }
         public bool IsNewFile { get; set; }
         public string? Description { get; set; }
+
+        // A-2: 서버 사전 계산 hunks
+        public DiffHunkDto[]? Hunks { get; set; }
+    }
+
+    /// <summary>A-2: 서버 사전 계산 diff hunk DTO.</summary>
+    internal sealed class DiffHunkDto
+    {
+        public int OriginalStart { get; set; }
+        public int OriginalEnd   { get; set; }
+        public string NewText    { get; set; } = "";
     }
 
     internal sealed class RunFileContextDto

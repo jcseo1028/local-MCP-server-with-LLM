@@ -491,7 +491,7 @@ ChatRunStartRequest {
   files: [                      // 멀티 파일 컨텍스트 (null이면 단건 필드 사용) — v2.2
     {
       filePath: string
-      code: string
+      code: string              // B-5: 파일당 8,000자 / 전체 32,000자 제한 (서버 측 자동 절단)
       language: string | null
       selectionOnly: boolean
       selectedCode: string | null
@@ -551,6 +551,13 @@ ChatRunSnapshot {
         selectionOnly: boolean
         isNewFile: boolean
         description: string | null
+        hunks: [              // 서버 사전 계산 diff hunks — A-2 (null이면 VSIX가 직접 계산)
+          {
+            originalStart: number  // 원본 기준 시작 라인 (0-based, inclusive)
+            originalEnd: number    // 원본 기준 끝 라인 (0-based, exclusive)
+            newText: string        // 교체할 새 텍스트
+          }
+        ] | null
       }
     ] | null
   } | null

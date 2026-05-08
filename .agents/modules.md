@@ -18,11 +18,11 @@
 - **Run REST (v2.1)**: `POST /api/chat/runs`, `GET /api/chat/runs/{runId}`, `POST /api/chat/runs/{runId}/approval`, `POST /api/chat/runs/{runId}/client-result` — 다단계 오케스트레이션 (contracts.md §11)
 - **IntentResolver**: 사용자 메시지를 분석하여 적절한 도구를 선택한다. LLM Connector를 직접 호출하되, 이는 "도구 실행"이 아닌 "라우팅 결정"이다. v2.1에서 **계획 수립**(최대 5개 항목) 역할도 포함한다.
 - **DocumentSearcher (v2.1)**: `Config.documentSearch.directories` 내 로컬 문서를 검색한다. Resource Cache를 통해 조회하며, 문서가 없으면 Skipped 처리한다. 외부 네트워크를 호출하지 않는다.
-- **RunOrchestrator (v2.1)**: Run 단위로 9단계 상태 머신을 관리한다. IntentResolver, DocumentSearcher, Tool Registry를 순차 호출하고 단계별 상태를 ConversationStore에 기록한다. context_collection 단계에서 코드 크기 검증(32KB 절단)을 수행한다.
+- **RunOrchestrator (v2.1)**: Run 단위로 9단계 상태 머신을 관리한다. IntentResolver, DocumentSearcher, Tool Registry를 순차 호출하고 단계별 상태를 ConversationStore에 기록한다. context_collection 단계에서 코드 크기 검증(32KB 절단)을 수행한다. **A-2**: `BuildFileChange()`에서 `DiffEngine.Compute()`를 호출하여 `FileChange.Hunks`를 사전 계산하고 proposal에 포함한다. **B-4**: `ParseFileBlocks()`가 1차 `[FILE:]…[/FILE]` 파싱 후 실패 시 2차 마크다운 헤딩(`### path.ext`, `**path.ext**`, `// File:`) 패턴 폴백 파싱. **B-5**: `BuildFilesContext()`에서 파일당 8,000자 / 전체 32,000자 제한 적용, 임시표 `파일별 비율 분배` 절단, 프롬프트 내 생략 표시.
 - **검증 모드**: `ChatRunStartRequest.intentAndPlanOnly=true` 이면 RunOrchestrator가 의도 분석과 계획 수립까지만 수행하고, 후속 단계는 Skipped 처리한 뒤 즉시 완료한다. 느린 LLM 환경에서 의도/계획의 타당성을 우선 검증하기 위한 모드다.
 - **ConversationStore**: 대화 상태를 메모리 내 관리. 대화 이력을 LLM 컨텍스트에 포함. v2.1에서 **run 단위 실행 상태**도 함께 관리. 향후 SQLite 등 경량 DB 마이그레이션 가능하도록 인터페이스 분리.
 - **제약**: 모든 LLM 호출은 로컬 엔드포인트(Ollama 등)만 사용. 원격 LLM API 금지. 문서검색은 로컬 파일만 대상.
-- **구현**: `McpServer/McpEndpoints.cs` — SSE + REST + Chat + Run 엔드포인트, `McpServer/IntentResolver.cs`, `McpServer/ConversationStore.cs`, `McpServer/RunOrchestrator.cs` (v2.1), `McpServer/DocumentSearcher.cs` (v2.1), `McpServer/RunModels.cs` (v2.1 상태 모델), `McpServer/RunLogger.cs` (v2.1 파이프라인 로깅)
+- **구현**: `McpServer/McpEndpoints.cs` — SSE + REST + Chat + Run 엔드포인트, `McpServer/IntentResolver.cs`, `McpServer/ConversationStore.cs`, `McpServer/RunOrchestrator.cs` (v2.1), `McpServer/DiffEngine.cs` (A-2 서버 측 diff 사전 계산), `McpServer/DocumentSearcher.cs` (v2.1), `McpServer/RunModels.cs` (v2.1 상태 모델 + `DiffHunkInfo`), `McpServer/RunLogger.cs` (v2.1 파이프라인 로깅)
 
 ## 2. Tool Registry
 
@@ -84,11 +84,11 @@
 - **VS 테마**: VsBrushes + VSColorTheme 기반 Dark/Light/Blue 자동 대응
 - **Markdown 렌더링**: Markdig AST → WPF FlowDocument 변환 (헤딩, 리스트, 코드블록, 볼드/이탤릭, 인용)
 - **채팅 UI**: 사용자 메시지(우측) / 봇 응답(좌측) 대화 형태. Enter 전송, Shift+Enter 줄바꿈.
-- **코드 변경 승인**: 코드 수정 도구 결과를 side-by-side diff로 표시. 사용자 승인(✅) 시 에디터에 적용, 거부(❌) 시 미적용. VS Undo 스택으로 자동 백업.
-- **코드 적용 모드**: 선택 영역 모드(SelectionOnly)일 때 원본 텍스트를 문서에서 찾아 해당 부분만 교체. 원본 매칭 실패 시 적용 실패로 처리하고 build_test는 Skipped (§8g). 전체 파일 모드일 때 전체 교체.
+- **코드 변경 승인**: 코드 수정 도구 결과를 side-by-side diff로 표시. 사용자 승인(✅) 시 에디터에 적용, 거부(❌) 시 미적용. VS Undo 스택으로 자동 백업. **A-1**: per-hunk 수낙/거부 체크박스 UI—각 hunk 헤더에 체크박스가 표시되며 체크 해제 시 해당 hunk를 건너맜. **A-2**: 서버에서 `hunks`를 사전 계산하여 전달하면 VSIX `LineDiffEngine.Compute()` 재계산 생략. **A-3**: unified diff 콤러 하이라이트—삭제 라인 빨간 배경, 추가 라인 초록 배경, 컨텍스트 기본 배경, ±3 컨텍스트 라인 표시.
+- **코드 적용 모드**: 선택 영역 모드(SelectionOnly)일 때 원본 텍스트를 문서에서 찾아 해당 부분만 교체. 원본 매칭 실패 시 적용 실패로 처리하고 build_test는 Skipped (§8g). 전체 파일 모드일 때 전체 교체. **B-1**: 멀티파일 Expander 헤더에 파일별 승인/거부 체크박스 표시—체크 해제된 파일은 적용 제외. **B-2**: 파일 선택 UI—파일 선택 버튼 + 체크리스트 패널 토글로 열린 파일 직접 선택 가능. **B-3**: 멀티파일 atomic rollback—적용 전 원본 메모리 백업, 어느 파일이든 실패 시 이미 적용된 전체 반자.
 - **대화 세션 백업**: 새 대화 시작 또는 이전 대화 복원 시 현재 대화를 자동 백업. 최대 20개 세션 유지. 첫 번째 사용자 메시지를 제목으로 표시.
 - **코드 컨텍스트 확인**: 선택 영역 없이 코드 수정 요청 시 "현재 파일 전체를 포함할까요?" 확인 후 진행.
-- **구현**: `src/LocalMcpVsExtension/` — VSIX 프로젝트 (Community.VisualStudio.Toolkit.17, Markdig). `Services/McpRestClient.cs` (Run API 클라이언트 포함), `Services/ChatMessageViewModel.cs` (ChatRunViewModel·ChatRunStageViewModel 분리, 단계별 상태 열거형), `Services/BuildTestRunner.cs` (v2.1 오프라인 빌드/테스트), `ToolWindows/SummaryToolWindowControl.cs` (Run 폴링 + 타임라인 UI + 단계별 색상 구분 + 계획/참조 섹션 카드)
+- **구현**: `src/LocalMcpVsExtension/` — VSIX 프로젝트 (Community.VisualStudio.Toolkit.17, Markdig). `Services/McpRestClient.cs` (Run API 클라이언트 + `DiffHunkDto`), `Services/ChatMessageViewModel.cs` (ChatRunViewModel·ChatRunStageViewModel 분리, `CodeChangeInfo.HunkSelections`, `FileChangeInfo.HunkSelections`, `HunkSelection` 포함), `Services/BuildTestRunner.cs` (v2.1 오프라인 빌드/테스트), `Services/LineDiffEngine.cs` (Myers LCS diff, `DiffHunk`), `ToolWindows/SummaryToolWindowControl.cs` (Run 폴링 + 타임라인 UI + A-1/A-2/A-3/B-1/B-2/B-3 + 파일 선택·per-hunk·unified diff·rollback)
 - **빌드 주의**: SDK-style csproj에서 `<Import Project="Sdk.props" />` / `<Import Project="Sdk.targets" />` 를 명시적으로 분리하고 VsSDK.targets를 Sdk.targets 뒤에 import해야 pkgdef 생성과 VSIX 패키징이 동작한다. VS 2022 MSBuild로 빌드한다.
 
 ---

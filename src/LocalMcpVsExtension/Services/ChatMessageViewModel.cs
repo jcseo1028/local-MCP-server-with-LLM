@@ -144,6 +144,12 @@ namespace LocalMcpVsExtension.Services
         // v2.2 멀티 파일 지원
         public List<FileChangeInfo>? Files { get; set; }
         public bool IsMultiFile => Files != null && Files.Count > 0;
+
+        // C-2: 파일별 적용 결과 임시 보관 (서버 전송 직전까지)
+        public List<FileApplyResultDto>? ApplyResults { get; set; }
+
+        // A-1: 단일 파일 hunk별 수락/거부 선택
+        public List<HunkSelection>? HunkSelections { get; set; }
     }
 
     internal sealed class FileChangeInfo
@@ -154,6 +160,20 @@ namespace LocalMcpVsExtension.Services
         public bool SelectionOnly { get; set; }
         public bool IsNewFile { get; set; }
         public string? Description { get; set; }
+
+        /// <summary>B-1: 사용자가 체크박스로 이 파일의 적용 여부를 제어한다 (기본 true)</summary>
+        public bool IsSelected { get; set; } = true;
+
+        // A-1: 파일별 hunk 수락/거부 선택
+        public List<HunkSelection>? HunkSelections { get; set; }
+    }
+
+    /// <summary>A-1: diff hunk 하나에 대한 수락/거부 상태.</summary>
+    internal sealed class HunkSelection
+    {
+        public int HunkIndex { get; set; }
+        public bool IsAccepted { get; set; } = true;
+        public DiffHunk Hunk { get; set; } = null!;
     }
 
     /// <summary>과거 대화 세션 백업</summary>

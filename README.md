@@ -10,7 +10,7 @@
 - **코드 모델**: qwen2.5-coder:7b (코드 변환·수정용)
 - **일반 모델**: gemma4 (의도 분석·계획·대화·요약용)
 - **접속 방식**: SSE (VS 2022 Agent mode) 또는 Direct REST API (오프라인 CLI)
-- **상태**: 6개 도구 구현 (summarize·add_comments·refactor·fix·search_project_code·suggest_fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v2.0 (채팅 UI·의도 분석·자동 도구 선택·승인 흐름·side-by-side diff) · **v2.1 구현 완료** (다단계 오케스트레이션·계획수립·문서검색·빌드/테스트·결과요약·단계별 UI) · Resource Cache 구현 완료
+- **상태**: 6개 도구 구현 (summarize·add_comments·refactor·fix·search_project_code·suggest_fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v2.0 (채팅 UI·의도 분석·자동 도구 선택·승인 흐름·side-by-side diff) · **v2.1 구현 완료** (다단계 오케스트레이션·계획수립·문서검색·빌드/테스트·결과요약·단계별 UI) · Resource Cache 구현 완료 · **v2.2 구현 완료** (멀티파일 컨텍스트 전송·[FILE:] 프롬프트 안내·ApplyResults 전송) · **v2.3 구현 완료** (파일별 승인/거부 UI·파일 선택 UI·atomic rollback·[FILE:] 폴백 파싱) · **v2.4 구현 완료** (per-hunk accept/reject UI·unified diff 컬러 하이라이트·서버 측 hunks 사전 계산·대용량 파일 토큰 초과 대응)
 - **비목표**: GitHub Copilot 대체
 
 ## 구성
@@ -177,8 +177,9 @@ src/LocalMcpServer/
   McpServer/McpEndpoints.cs         — MCP SSE + Direct REST + Chat + Run 엔드포인트
   McpServer/IntentResolver.cs       — 의도 분석 + 계획 수립 + 요약 생성
   McpServer/ConversationStore.cs    — 대화 + Run 상태 관리 (인메모리)
-  McpServer/RunOrchestrator.cs      — 9단계 Run 상태 머신 (v2.1)
-  McpServer/RunModels.cs            — Run 상태 모델 + API DTO (v2.1)
+  McpServer/RunOrchestrator.cs      — 9단계 Run 상태 머신 (v2.1) + 서버 측 diff 사전 계산 (A-2) + B-5 토큰 절단
+  McpServer/RunModels.cs            — Run 상태 모델 + API DTO + DiffHunkInfo (v2.1/A-2)
+  McpServer/DiffEngine.cs           — 서버 측 LCS diff 엔진 (A-2 사전 계산용)
   McpServer/DocumentSearcher.cs     — 로컬 문서 검색 + Resource Cache 통합 (v2.1)
   ResourceCache/IResourceCache.cs   — Resource Cache 인터페이스
   ResourceCache/CacheModels.cs      — 캐시 요청/응답 모델 (contracts.md §4)
@@ -195,10 +196,11 @@ src/LocalMcpVsExtension/
   Commands/ShowSummaryWindowCommand.cs — Tool Window 열기 커맨드
   ToolWindows/SummaryToolWindow.cs  — Tool Window 정의
   ToolWindows/SummaryToolWindowControl.cs — 채팅 UI + Run 타임라인 + 빌드/테스트 실행
-  Services/McpRestClient.cs         — MCP Server REST 클라이언트 (Chat + Run API)
+  Services/McpRestClient.cs         — MCP Server REST 클라이언트 (Chat + Run API + DiffHunkDto)
   Services/LanguageDetector.cs      — 파일 확장자 → 언어 매핑
-  Services/ChatMessageViewModel.cs  — 채팅/Run 뷰 모델 (ChatRunViewModel 등)
+  Services/ChatMessageViewModel.cs  — 채팅/Run 뷰 모델 (HunkSelection, FileChangeInfo 포함)
   Services/BuildTestRunner.cs       — 오프라인 빌드/테스트 실행기 (v2.1)
+  Services/LineDiffEngine.cs        — Myers LCS diff 엔진 (DiffHunk)
 .vs/mcp.json                        — VS 2022 MCP 연결 설정
 ```
 
@@ -230,6 +232,28 @@ src/LocalMcpVsExtension/
 - VS Dark/Light/Blue 테마 자동 대응 (VsBrushes + VSColorTheme)
 - LLM 응답을 Markdown으로 렌더링 (헤딩, 리스트, 코드블록, 볼드 등)
 
+**v2.3 추가 기능:**
+- **파일별 개별 승인/거부**: 멀티 파일 수정 시 각 파일 Expander 헤더에 체크박스 표시 — 체크 해제된 파일은 적용 제외
+- **파일 선택 UI**: 📁 버튼으로 현재 열린 파일 체크리스트 패널 토글 — 서버에 전송할 파일 직접 선택
+- **Atomic Rollback**: 멀티 파일 적용 시 어느 파일이든 실패하면 이미 적용된 전체 파일 원복 (all-or-nothing)
+- **[FILE:] 폴백 파싱**: LLM이 `### path.ext` / `**path.ext**` / `// File: path` 형식으로 출력했을 때도 파싱 가능
+- **ApplyResults 전송**: 파일별 적용 결과를 `ClientResultRequest.ApplyResults`에 담아 서버에 전송
+- **멀티 파일 컨텍스트 수집**: `IVsRunningDocumentTable`로 VS에서 열린 코드 파일 자동 수집 후 서버 전달
+
+**v2.4 추가 기능:**
+- **Per-Hunk Accept/Reject UI**: 각 diff hunk 헤더에 체크박스 표시 — 체크 해제 시 해당 hunk만 건너뜀
+- **Unified Diff 컬러 하이라이트**: 삭제 라인=빨간 배경(`-`), 추가 라인=초록 배경(`+`), ±3 컨텍스트 라인, `@@ -x,y +x,z @@` 헤더
+- **서버 측 Hunks 사전 계산**: MCP 서버가 proposal 생성 시 `DiffEngine.Compute()`로 hunks 사전 계산 → VSIX 재계산 중복 제거
+- **대용량 파일 토큰 초과 대응**: 파일당 8,000자 / 전체 32,000자 제한, 초과 시 비율 절단 + 프롬프트에 생략 표시
+
+**v2.3 추가 기능:**
+- **파일별 개별 승인/거부**: 멀티 파일 수정 시 각 파일 Expander 헤더에 체크박스 표시 — 체크 해제된 파일은 적용 제외
+- **파일 선택 UI**: 📁 버튼으로 현재 열린 파일 체크리스트 패널 토글 — 서버에 전송할 파일 직접 선택
+- **Atomic Rollback**: 멀티 파일 적용 시 어느 파일이든 실패하면 이미 적용된 전체 파일 원복 (all-or-nothing)
+- **[FILE:] 폴백 파싱**: LLM이 `### path.ext` / `**path.ext**` / `// File: path` 형식으로 출력했을 때도 파싱 가능
+- **ApplyResults 전송**: 파일별 적용 결과를 `ClientResultRequest.ApplyResults`에 담아 서버에 전송
+- **멀티 파일 컨텍스트 수집**: `IVsRunningDocumentTable`로 VS에서 열린 코드 파일 자동 수집 후 서버 전달
+
 **v2.1 추가 기능:**
 - **9단계 오케스트레이션**: 의도분석 → 계획수립 → 컨텍스트수집 → 문서검색 → 수정안생성 → 승인 → 적용 → 빌드/테스트 → 결과요약
 - **의도/계획 검증 모드**: `POST /api/chat/runs`에 `intentAndPlanOnly=true`를 주면 의도 분석과 계획 수립까지만 실행하고 즉시 완료
@@ -239,15 +263,6 @@ src/LocalMcpVsExtension/
 - **오프라인 빌드/테스트**: --no-restore 빌드 + 네트워크 무관 단위 테스트 자동 실행
 - **최종 요약**: 의도·계획·수정·빌드 결과를 LLM이 종합 요약
 - **로컬 문서 검색**: 설정된 로컬 폴더에서 규칙/참조 문서 키워드 검색
-
-**v2.1 추가 기능:**
-- **9단계 오케스트레이션**: 의도분석 → 계획수립 → 컨텍스트수집 → 문서검색 → 수정안생성 → 승인 → 적용 → 빌드/테스트 → 결과요약
-- **단계별 타임라인 UI**: 각 단계의 진행 상태를 색상으로 구분하여 실시간 표시 (Completed=초록, InProgress=파랑, Failed=빨강)
-- **계획/참조 섹션**: Run 카드에 포함된 계획 항목과 참조 문서를 섹션 카드로 표시
-- **컨텍스트 검증**: 코드 32KB 초과 시 자동 절단, 적용 실패 시 build/test 자동 생략
-- **오프라인 빌드/테스트**: --no-restore 빌드 + 네트워크 무관 단위 테스트 자동 실행
-- **최종 요약**: 의도·계획·수정·빌드 결과를 LLM이 종합 요약
-- **로컬 문서 검색**: 설정된 로컬 폴더에서 규칙/참조 문서 키워드 검색 (기존 ask_local_docs 기능 대체)
 
 ### 빌드
 

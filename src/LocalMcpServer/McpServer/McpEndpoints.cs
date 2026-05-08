@@ -472,7 +472,23 @@ public static class McpEndpoints
                 summary = run.Proposal.Summary,
                 original = run.Proposal.Original,
                 modified = run.Proposal.Modified,
-                requiresApproval = run.Proposal.RequiresApproval
+                requiresApproval = run.Proposal.RequiresApproval,
+                // v2.2 멀티 파일 변경 + A-2 사전 계산 hunks
+                changes = run.Proposal.Changes?.Select(c => new
+                {
+                    filePath = c.FilePath,
+                    original = c.Original,
+                    modified = c.Modified,
+                    selectionOnly = c.SelectionOnly,
+                    isNewFile = c.IsNewFile,
+                    description = c.Description,
+                    hunks = c.Hunks?.Select(h => new
+                    {
+                        originalStart = h.OriginalStart,
+                        originalEnd   = h.OriginalEnd,
+                        newText       = h.NewText
+                    }).ToArray()
+                }).ToArray()
             } : null,
             finalSummary = run.FinalSummary,
             error = run.Error

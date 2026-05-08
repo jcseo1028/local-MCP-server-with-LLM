@@ -161,6 +161,24 @@ public sealed class FileChange
     public bool SelectionOnly { get; set; }
     public bool IsNewFile { get; set; }
     public string? Description { get; set; }
+
+    // A-2: 서버 측 사전 계산 hunks (VSIX 재계산 생략 목적)
+    public DiffHunkInfo[]? Hunks { get; set; }
+}
+
+/// <summary>A-2: 서버 측 사전 계산 diff hunk 정보.</summary>
+public sealed class DiffHunkInfo
+{
+    public int OriginalStart { get; }
+    public int OriginalEnd   { get; }
+    public string NewText    { get; }
+
+    public DiffHunkInfo(int originalStart, int originalEnd, string newText)
+    {
+        OriginalStart = originalStart;
+        OriginalEnd   = originalEnd;
+        NewText       = newText;
+    }
 }
 
 public sealed class FileContext

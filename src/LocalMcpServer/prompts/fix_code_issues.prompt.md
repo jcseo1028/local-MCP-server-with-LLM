@@ -26,6 +26,7 @@
 
 이슈가 없으면 "이슈가 발견되지 않았습니다."라고 답변한다.
 
+{{files_context}}
 {{language}} 코드:
 ```{{language}}
 {{code}}
