@@ -38,6 +38,10 @@ public abstract class CodeToolBase : IMcpTool
         var language = GetStringArg(arguments, "language") ?? "";
 
         var filesContext = GetStringArg(arguments, "files_context") ?? "";
+        var isMultiFile = !string.IsNullOrWhiteSpace(filesContext);
+        var singleCodeSection = isMultiFile
+            ? ""
+            : $"{language} 코드:\n```{language}\n{code}\n```";
 
         var prompt = await _promptLoader.LoadAndRenderAsync(
             Name,
@@ -45,7 +49,8 @@ public abstract class CodeToolBase : IMcpTool
             {
                 ["code"] = code,
                 ["language"] = language,
-                ["files_context"] = filesContext
+                ["files_context"] = filesContext,
+                ["single_code_section"] = singleCodeSection
             },
             ct);
 

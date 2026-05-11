@@ -10,7 +10,7 @@
 - **코드 모델**: qwen2.5-coder:7b (코드 변환·수정용)
 - **일반 모델**: gemma4 (의도 분석·계획·대화·요약용)
 - **접속 방식**: SSE (VS 2022 Agent mode) 또는 Direct REST API (오프라인 CLI)
-- **상태**: 6개 도구 구현 (summarize·add_comments·refactor·fix·search_project_code·suggest_fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v2.0 (채팅 UI·의도 분석·자동 도구 선택·승인 흐름·side-by-side diff) · **v2.1 구현 완료** (다단계 오케스트레이션·계획수립·문서검색·빌드/테스트·결과요약·단계별 UI) · Resource Cache 구현 완료 · **v2.2 구현 완료** (멀티파일 컨텍스트 전송·[FILE:] 프롬프트 안내·ApplyResults 전송) · **v2.3 구현 완료** (파일별 승인/거부 UI·파일 선택 UI·atomic rollback·[FILE:] 폴백 파싱) · **v2.4 구현 완료** (per-hunk accept/reject UI·unified diff 컬러 하이라이트·서버 측 hunks 사전 계산·대용량 파일 토큰 초과 대응)
+- **상태**: 7개 도구 구현 (summarize·add_comments·refactor·organize_imports·fix·search_project_code·suggest_fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v2.0 (채팅 UI·의도 분석·자동 도구 선택·승인 흐름·side-by-side diff) · **v2.1 구현 완료** (다단계 오케스트레이션·계획수립·문서검색·빌드/테스트·결과요약·단계별 UI) · Resource Cache 구현 완료 · **v2.2 구현 완료** (멀티파일 컨텍스트 전송·[FILE:] 프롬프트 안내·ApplyResults 전송) · **v2.3 구현 완료** (파일별 승인/거부 UI·파일 선택 UI·atomic rollback·[FILE:] 폴백 파싱) · **v2.4 구현 완료** (per-hunk accept/reject UI·unified diff 컬러 하이라이트·서버 측 hunks 사전 계산·대용량 파일 토큰 초과 대응) · **v2.5 구현 완료** (organize_imports 도구 추가·멀티파일 출력 엄격 모드·using/import 전용 검증 및 자동 보정)
 - **비목표**: GitHub Copilot 대체
 
 ## 구성
@@ -102,6 +102,7 @@ Invoke-RestMethod http://localhost:5100/api/tools/call -Method POST `
 | `summarize_current_code` | 코드 텍스트를 받아 한국어로 구조화된 요약 | ✅ 구현 완료 |
 | `add_comments` | 코드에 문서 주석(XML doc, JSDoc 등) + 인라인 주석 자동 추가 | ✅ 구현 완료 |
 | `refactor_current_code` | 가독성·구조·현대적 표현 기반 코드 리팩터링 | ✅ 구현 완료 |
+| `organize_imports` | using/import 구문만 정리 (코드 본문 변경 금지) | ✅ 구현 완료 |
 | `fix_code_issues` | 버그·안티패턴·보안 취약점 탐지 및 수정 | ✅ 구현 완료 |
 | `search_project_code` | 프로젝트 내 코드 검색 | ✅ 구현 완료 (Resource Cache 필요) |
 | `suggest_fix_from_error_log` | 에러 로그 기반 수정 제안 | ✅ 구현 완료 |
@@ -170,6 +171,7 @@ src/LocalMcpServer/
   ToolRegistry/CodeToolBase.cs              — 코드 수정 도구 공통 추상 클래스
   ToolRegistry/AddCommentsTool.cs           — add_comments 구현
   ToolRegistry/RefactorCurrentCodeTool.cs   — refactor_current_code 구현
+  ToolRegistry/OrganizeImportsTool.cs       — organize_imports 구현
   ToolRegistry/FixCodeIssuesTool.cs         — fix_code_issues 구현
   ToolRegistry/SearchProjectCodeTool.cs     — search_project_code 구현 (Resource Cache)
   ToolRegistry/SuggestFixFromErrorLogTool.cs — suggest_fix_from_error_log 구현
@@ -245,6 +247,11 @@ src/LocalMcpVsExtension/
 - **Unified Diff 컬러 하이라이트**: 삭제 라인=빨간 배경(`-`), 추가 라인=초록 배경(`+`), ±3 컨텍스트 라인, `@@ -x,y +x,z @@` 헤더
 - **서버 측 Hunks 사전 계산**: MCP 서버가 proposal 생성 시 `DiffEngine.Compute()`로 hunks 사전 계산 → VSIX 재계산 중복 제거
 - **대용량 파일 토큰 초과 대응**: 파일당 8,000자 / 전체 32,000자 제한, 초과 시 비율 절단 + 프롬프트에 생략 표시
+
+**v2.5 추가 기능:**
+- **organize_imports 도구 추가**: using/import 구문 정리 전용 도구 분리 (`organize_imports`)
+- **멀티파일 출력 엄격 모드**: `[FILE: 경로]...[/FILE]` 파싱 실패 시 단건 조용한 폴백 없이 1회 재시도 후 명시적 실패
+- **using/import 전용 안전장치**: 본문 변경 감지 시 검증 수행, 필요 시 import 블록만 원본 본문에 자동 보정 후 적용
 
 **v2.1 추가 기능:**
 - **9단계 오케스트레이션**: 의도분석 → 계획수립 → 컨텍스트수집 → 문서검색 → 수정안생성 → 승인 → 적용 → 빌드/테스트 → 결과요약

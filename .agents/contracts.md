@@ -284,17 +284,45 @@ Output {
 
 ```
 Input {
-  code: string            // 리팩터링할 코드 텍스트
-  language: string | null // 프로그래밍 언어 (null이면 자동 감지)
+  code: string | null           // 리팩터링할 코드 텍스트 (단건 모드, files_context 없을 때 사용)
+  language: string | null       // 프로그래밍 언어 (null이면 자동 감지, 단건 모드 전용)
+  files_context: string | null  // 멀티 파일 컨텍스트 블록 (RunOrchestrator.BuildFilesContext() 생성)
+                                // files_context가 있으면 멀티 파일 모드로 동작 — [FILE:] 형식 출력 강제
 }
 
 Output {
-  text: string            // 변경 요약 + 리팩터링된 전체 코드
+  text: string  // 단건 모드: 변경 요약 + 리팩터링된 전체 코드
+                // 멀티 파일 모드: [FILE: 경로]...[/FILE] 블록만 포함
 }
 ```
 
-- **사용 모듈**: LLM Connector (Temperature 0.3, MaxTokens 2048)
+- **내부 처리**: `files_context` 있으면 멀티파일 모드 — 모든 수정 파일을 [FILE:] 블록으로 출력 강제.  
+  파싱 실패(0건) 시 1회 재시도 후 명시적 실패 반환 (단건 조용한 폴백 금지).
+- **사용 모듈**: LLM Connector (Temperature 0.3, MaxTokens 8192, NumCtx 16384)
 - **프롬프트**: `prompts/refactor_current_code.prompt.md`
+- **VSIX**: 결과를 에디터에 직접 적용 가능 ("적용" 버튼)
+
+### 7d-2. organize_imports
+
+using/import 구문만 정리한다. 코드 로직·변수명·메서드 시그니처를 변경하지 않는다.
+
+```
+Input {
+  code: string | null           // 정리 대상 코드 텍스트 (단건 모드)
+  language: string | null       // 프로그래밍 언어
+  files_context: string | null  // 멀티 파일 컨텍스트 블록 (있으면 멀티파일 모드)
+}
+
+Output {
+  text: string  // 단건 모드: using/import 정리된 전체 코드
+                // 멀티 파일 모드: [FILE: 경로]...[/FILE] 블록만 포함
+}
+```
+
+- **제약**: import/using 구문 삽입·삭제·정렬만 허용. 그 외 코드 변경 금지.
+- **내부 처리**: 서버는 결과에서 using/import 외 본문 변경 여부를 검증한다. 본문이 변경된 경우 import 블록만 원본 본문에 자동 투영하여 보정 후 재검증한다. 재검증 실패 시 명시적 실패를 반환한다.
+- **사용 모듈**: LLM Connector (Temperature 0.1, MaxTokens 4096, NumCtx 8192)
+- **프롬프트**: `prompts/organize_imports.prompt.md`
 - **VSIX**: 결과를 에디터에 직접 적용 가능 ("적용" 버튼)
 
 ### 7e. fix_code_issues

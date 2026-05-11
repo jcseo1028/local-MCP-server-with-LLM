@@ -18,7 +18,7 @@
 - **Run REST (v2.1)**: `POST /api/chat/runs`, `GET /api/chat/runs/{runId}`, `POST /api/chat/runs/{runId}/approval`, `POST /api/chat/runs/{runId}/client-result` — 다단계 오케스트레이션 (contracts.md §11)
 - **IntentResolver**: 사용자 메시지를 분석하여 적절한 도구를 선택한다. LLM Connector를 직접 호출하되, 이는 "도구 실행"이 아닌 "라우팅 결정"이다. v2.1에서 **계획 수립**(최대 5개 항목) 역할도 포함한다.
 - **DocumentSearcher (v2.1)**: `Config.documentSearch.directories` 내 로컬 문서를 검색한다. Resource Cache를 통해 조회하며, 문서가 없으면 Skipped 처리한다. 외부 네트워크를 호출하지 않는다.
-- **RunOrchestrator (v2.1)**: Run 단위로 9단계 상태 머신을 관리한다. IntentResolver, DocumentSearcher, Tool Registry를 순차 호출하고 단계별 상태를 ConversationStore에 기록한다. context_collection 단계에서 코드 크기 검증(32KB 절단)을 수행한다. **A-2**: `BuildFileChange()`에서 `DiffEngine.Compute()`를 호출하여 `FileChange.Hunks`를 사전 계산하고 proposal에 포함한다. **B-4**: `ParseFileBlocks()`가 1차 `[FILE:]…[/FILE]` 파싱 후 실패 시 2차 마크다운 헤딩(`### path.ext`, `**path.ext**`, `// File:`) 패턴 폴백 파싱. **B-5**: `BuildFilesContext()`에서 파일당 8,000자 / 전체 32,000자 제한 적용, 임시표 `파일별 비율 분배` 절단, 프롬프트 내 생략 표시.
+- **RunOrchestrator (v2.1)**: Run 단위로 9단계 상태 머신을 관리한다. IntentResolver, DocumentSearcher, Tool Registry를 순차 호출하고 단계별 상태를 ConversationStore에 기록한다. context_collection 단계에서 코드 크기 검증(32KB 절단)을 수행한다. **A-2**: `BuildFileChange()`에서 `DiffEngine.Compute()`를 호출하여 `FileChange.Hunks`를 사전 계산하고 proposal에 포함한다. **B-4**: `ParseFileBlocks()`가 1차 `[FILE:]…[/FILE]` 파싱 후 실패 시 2차 마크다운 헤딩(`### path.ext`, `**path.ext**`, `// File:`) 패턴 폴백 파싱. **B-5**: `BuildFilesContext()`에서 파일당 8,000자 / 전체 32,000자 제한 적용, 임시표 `파일별 비율 분배` 절단, 프롬프트 내 생략 표시. **SC-4**: 멀티파일 입력에서 `[FILE:]` 파싱 실패 시 단건 조용한 폴백 없이 1회 재시도 후 명시적 실패 처리. **SC-5**: `organize_imports` 결과는 using/import 외 본문 변경 여부를 검증하고, 본문이 변경된 경우 import 블록만 원본 본문에 자동 투영(자동 보정) 후 재검증한다.
 - **검증 모드**: `ChatRunStartRequest.intentAndPlanOnly=true` 이면 RunOrchestrator가 의도 분석과 계획 수립까지만 수행하고, 후속 단계는 Skipped 처리한 뒤 즉시 완료한다. 느린 LLM 환경에서 의도/계획의 타당성을 우선 검증하기 위한 모드다.
 - **ConversationStore**: 대화 상태를 메모리 내 관리. 대화 이력을 LLM 컨텍스트에 포함. v2.1에서 **run 단위 실행 상태**도 함께 관리. 향후 SQLite 등 경량 DB 마이그레이션 가능하도록 인터페이스 분리.
 - **제약**: 모든 LLM 호출은 로컬 엔드포인트(Ollama 등)만 사용. 원격 LLM API 금지. 문서검색은 로컬 파일만 대상.
@@ -32,9 +32,9 @@
 - **의존**: LLM Connector (도구 실행 시 필요한 경우에만), Resource Cache (도구 실행 시 자료 조회가 필요한 경우에만), Configuration
 - **비의존**: MCP Server
 - **프롬프트 관리**: 각 도구는 `Config.tools.promptsDirectory`에서 `{toolName}.prompt.md` 파일을 로드하여 변수 치환 후 LLMRequest.prompt로 전달한다. 코드 수정 없이 프롬프트 튜닝이 가능하다.
-- **코드 수정 도구 패턴**: `CodeToolBase` 추상 클래스가 code+language 입력, LLM 호출, 옵션 오버라이드 패턴을 공통화한다. 개별 도구(AddCommentsTool, RefactorCurrentCodeTool, FixCodeIssuesTool)는 이를 상속하여 프롬프트와 LlmOptions만 정의한다.
+- **코드 수정 도구 패턴**: `CodeToolBase` 추상 클래스가 code+language(+files_context) 입력, LLM 호출, 옵션 오버라이드 패턴을 공통화한다. 멀티파일 모드에서는 `single_code_section`을 빈 문자열로 만들어 단건 코드 블록 출력을 비활성화한다. 개별 도구(AddCommentsTool, RefactorCurrentCodeTool, OrganizeImportsTool, FixCodeIssuesTool)는 이를 상속하여 프롬프트와 LlmOptions만 정의한다.
 - **프로젝트 구조 분석 도구**: `AnalyzeProjectStructureTool`은 Resource Cache의 코드 인덱스(파일/심볼 구조)를 LLM 컨텍스트로 전달하여 프로젝트 전체 아키텍처를 분석한다. 단일 파일이 아닌 프로젝트 범위 분석을 담당한다.
-- **구현**: `ToolRegistry/` — ToolRegistryService, SummarizeCurrentCodeTool, CodeToolBase, AddCommentsTool, RefactorCurrentCodeTool, FixCodeIssuesTool, AnalyzeProjectStructureTool, PromptTemplateLoader
+- **구현**: `ToolRegistry/` — ToolRegistryService, SummarizeCurrentCodeTool, CodeToolBase, AddCommentsTool, RefactorCurrentCodeTool, OrganizeImportsTool, FixCodeIssuesTool, AnalyzeProjectStructureTool, PromptTemplateLoader
 
 ## 3. LLM Connector
 

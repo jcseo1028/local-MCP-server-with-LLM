@@ -31,6 +31,7 @@ builder.Services.AddSingleton(sp =>
 builder.Services.AddSingleton<SummarizeCurrentCodeTool>();
 builder.Services.AddSingleton<AddCommentsTool>();
 builder.Services.AddSingleton<RefactorCurrentCodeTool>();
+builder.Services.AddSingleton<OrganizeImportsTool>();
 builder.Services.AddSingleton<FixCodeIssuesTool>();
 builder.Services.AddSingleton<SearchProjectCodeTool>();
 builder.Services.AddSingleton<SuggestFixFromErrorLogTool>();
@@ -41,6 +42,7 @@ builder.Services.AddSingleton<ToolRegistryService>(sp =>
     registry.Register(sp.GetRequiredService<SummarizeCurrentCodeTool>());
     registry.Register(sp.GetRequiredService<AddCommentsTool>());
     registry.Register(sp.GetRequiredService<RefactorCurrentCodeTool>());
+    registry.Register(sp.GetRequiredService<OrganizeImportsTool>());
     registry.Register(sp.GetRequiredService<FixCodeIssuesTool>());
     registry.Register(sp.GetRequiredService<SearchProjectCodeTool>());
     registry.Register(sp.GetRequiredService<SuggestFixFromErrorLogTool>());

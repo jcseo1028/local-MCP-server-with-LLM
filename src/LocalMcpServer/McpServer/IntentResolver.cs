@@ -22,7 +22,7 @@ public sealed class IntentResolver
     // 코드 수정 도구 (결과를 에디터에 적용하기 위해 승인이 필요한 도구)
     private static readonly HashSet<string> EditTools = new(StringComparer.OrdinalIgnoreCase)
     {
-        "add_comments", "refactor_current_code", "fix_code_issues"
+        "add_comments", "refactor_current_code", "fix_code_issues", "organize_imports"
     };
 
     public IntentResolver(
@@ -140,8 +140,10 @@ public sealed class IntentResolver
             (null, ["요약", "설명해", "알려줘"], "summarize_current_code", "현재 코드 요약 요청", 0.5),
 
             // 나머지는 기존 단일 키워드 매칭
-            (null, ["주석", "코멘트", "comment", "문서화", "doc"], "add_comments", "코드 주석 추가 요청", 0.5),
-            (null, ["리팩터", "리팩토링", "refactor", "개선", "정리"], "refactor_current_code", "코드 리팩터링 요청", 0.5),
+            (null, ["주석", "코멘트", "comment", "문서화", "doc"], "add_comments", "코드 주석 추가 요청", 0.5),            // using/import 전용 정리 — refactor_current_code보다 우선 매핑 (SC-5)
+            (["using"], ["정리", "추가", "삭제", "제거", "organize"], "organize_imports", "using 정리 요청", 0.8),
+            (["import"], ["정리", "추가", "삭제", "제거", "organize"], "organize_imports", "import 정리 요청", 0.8),
+            (null, ["네임스페이스 정리", "import 정리", "using 정리", "organize import"], "organize_imports", "import/using 정리 요청", 0.7),            (null, ["리팩터", "리팩토링", "refactor", "개선", "정리"], "refactor_current_code", "코드 리팩터링 요청", 0.5),
             (null, ["버그", "오류", "fix", "수정", "고쳐"], "fix_code_issues", "코드 수정 요청", 0.5),
             (null, ["검색", "찾아", "search", "어디"], "search_project_code", "코드 검색 요청", 0.5),
             (null, ["에러", "로그", "error", "스택", "exception"], "suggest_fix_from_error_log", "에러 로그 기반 수정 요청", 0.5),

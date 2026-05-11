@@ -41,6 +41,11 @@
 {"toolName": "add_comments", "confidence": 0.9, "description": "코드에 문서 주석 추가 요청"}
 ```
 
+사용자: "using 정리해줘"
+```json
+{"toolName": "organize_imports", "confidence": 0.95, "description": "using/import 구문 정리 요청"}
+```
+
 사용자: "프로젝트 구조를 분석해줘"
 ```json
 {"toolName": "analyze_project_structure", "confidence": 0.9, "description": "프로젝트 전체 구조 분석 요청"}

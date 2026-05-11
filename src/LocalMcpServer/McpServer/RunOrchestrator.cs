@@ -332,11 +332,12 @@ public sealed class RunOrchestrator
             var tool = _registry.GetTool(run.Intent.ToolName);
             if (tool is not null)
             {
+                var filesContext = BuildFilesContext(run);
                 var arguments = new Dictionary<string, object?>
                 {
                     ["code"] = run.Code ?? "",
                     ["language"] = run.Language ?? "",
-                    ["files_context"] = BuildFilesContext(run)
+                    ["files_context"] = filesContext
                 };
 
                 var toolResult = await tool.ExecuteAsync(arguments, ct);
@@ -351,6 +352,17 @@ public sealed class RunOrchestrator
                     var fileChanges = ParseFileBlocks(resultText, run);
                     if (fileChanges.Count > 0)
                     {
+                        if (IsOrganizeImportsTool(run.Intent.ToolName) &&
+                            !EnforceOrganizeImportsOnly(fileChanges, out var validationError))
+                        {
+                            run.Proposal = new RunProposal
+                            {
+                                Summary = $"using/import 정리 검증 실패: {validationError}",
+                                RequiresApproval = false
+                            };
+                            return;
+                        }
+
                         run.Proposal = new RunProposal
                         {
                             Summary = $"{run.Intent.ToolName} 수정안 생성 ({fileChanges.Count}개 파일)",
@@ -358,13 +370,71 @@ public sealed class RunOrchestrator
                             RequiresApproval = true
                         };
                     }
+                    else if (!string.IsNullOrEmpty(filesContext))
+                    {
+                        // SC-4: 멀티파일 입력이 있었는데 [FILE:] 파싱 실패 → 1회 재시도
+                        _logger.LogWarning("Run {RunId} 멀티파일 파싱 실패, 출력 포맷 강제 후 재시도", run.RunId);
+                        var retryArgs = new Dictionary<string, object?>(arguments)
+                        {
+                            ["files_context"] = filesContext +
+                                "\n\n**필수**: 위 파일들은 반드시 [FILE: 경로]...전체 코드...[/FILE] 형식으로만 출력하라. 코드 블록 단독 출력 금지."
+                        };
+                        var retryResult = await tool.ExecuteAsync(retryArgs, ct);
+                        var retryText = retryResult.Content.FirstOrDefault()?.Text ?? "";
+                        var retryChanges = ParseFileBlocks(retryText, run);
+
+                        if (retryChanges.Count > 0)
+                        {
+                            if (IsOrganizeImportsTool(run.Intent.ToolName) &&
+                                !EnforceOrganizeImportsOnly(retryChanges, out var retryValidationError))
+                            {
+                                run.Proposal = new RunProposal
+                                {
+                                    Summary = $"using/import 정리 검증 실패: {retryValidationError}",
+                                    RequiresApproval = false
+                                };
+                                return;
+                            }
+
+                            run.Proposal = new RunProposal
+                            {
+                                Summary = $"{run.Intent.ToolName} 수정안 생성 ({retryChanges.Count}개 파일)",
+                                Changes = retryChanges,
+                                RequiresApproval = true
+                            };
+                        }
+                        else
+                        {
+                            // 재시도 후에도 실패 → 명시적 실패 반환 (조용한 단건 폴백 금지)
+                            _logger.LogError("Run {RunId} 멀티파일 재시도 후도 파싱 실패", run.RunId);
+                            run.Proposal = new RunProposal
+                            {
+                                Summary = "멀티파일 수정안 생성 실패: 모델이 [FILE: 경로] 형식으로 응답하지 않았습니다. " +
+                                          "단일 파일로 다시 요청하거나 더 큰 모델을 사용해 주세요.",
+                                RequiresApproval = false
+                            };
+                        }
+                    }
                     else
                     {
+                        var singleModified = modifiedCode ?? resultText;
+                        if (IsOrganizeImportsTool(run.Intent.ToolName) &&
+                            run.Code is not null &&
+                            !EnforceOrganizeImportsSingle(run.Code, singleModified, out singleModified, out var singleValidationError))
+                        {
+                            run.Proposal = new RunProposal
+                            {
+                                Summary = $"using/import 정리 검증 실패: {singleValidationError}",
+                                RequiresApproval = false
+                            };
+                            return;
+                        }
+
                         run.Proposal = new RunProposal
                         {
                             Summary = $"{run.Intent.ToolName} 수정안 생성",
                             Original = run.Code,
-                            Modified = modifiedCode ?? resultText,
+                            Modified = singleModified,
                             RequiresApproval = true
                         };
                     }
@@ -530,6 +600,192 @@ public sealed class RunOrchestrator
         // 2차 폴백: ### path.ext 또는 **path.ext** 마크다운 헤딩 + 코드 펜스
         result = ParseFileBlocksMarkdownHeading(llmOutput, run);
         return result;
+    }
+
+    private static bool IsOrganizeImportsTool(string? toolName) =>
+        string.Equals(toolName, "organize_imports", StringComparison.OrdinalIgnoreCase);
+
+    private static bool EnforceOrganizeImportsOnly(List<FileChange> changes, out string error)
+    {
+        foreach (var change in changes)
+        {
+            if (!EnforceOrganizeImportsSingle(change.Original, change.Modified, out var sanitized, out error))
+            {
+                error = $"{change.FilePath} — {error}";
+                return false;
+            }
+
+            change.Modified = sanitized;
+            var recomputed = DiffEngine.Compute(change.Original, change.Modified);
+            change.Hunks = recomputed.Count > 0 ? [.. recomputed] : null;
+        }
+
+        error = string.Empty;
+        return true;
+    }
+
+    private static bool EnforceOrganizeImportsSingle(string original, string modified, out string sanitized, out string error)
+    {
+        if (ValidateOrganizeImportsSingle(original, modified))
+        {
+            sanitized = modified;
+            error = string.Empty;
+            return true;
+        }
+
+        // 모델이 본문까지 바꿔도 import 블록만 투영해 복구를 시도한다.
+        if (TryProjectImportsOnly(original, modified, out var projected) &&
+            ValidateOrganizeImportsSingle(original, projected))
+        {
+            sanitized = projected;
+            error = string.Empty;
+            return true;
+        }
+
+        sanitized = modified;
+        error = "using/import 외 코드가 변경되었습니다.";
+        return false;
+    }
+
+    private static bool ValidateOrganizeImportsSingle(string original, string modified)
+    {
+        var normalizedOriginalBody = NormalizeBodyWithoutUsingLines(original);
+        var normalizedModifiedBody = NormalizeBodyWithoutUsingLines(modified);
+
+        return string.Equals(normalizedOriginalBody, normalizedModifiedBody, StringComparison.Ordinal);
+    }
+
+    private static bool TryProjectImportsOnly(string original, string modified, out string projected)
+    {
+        projected = original;
+
+        var origLines = SplitLinesKeepEol(original);
+        var modLines  = SplitLinesKeepEol(modified);
+        if (origLines.Count == 0 || modLines.Count == 0)
+            return false;
+
+        var (origFirst, origLast) = FindTopImportRange(origLines);
+        if (origFirst < 0 || origLast < origFirst)
+            return false;
+
+        var modImports = CollectTopImportLines(modLines);
+        if (modImports.Count == 0)
+            return false;
+
+        var newline = original.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var dedup = new HashSet<string>(StringComparer.Ordinal);
+        var normalizedImports = new List<string>();
+        foreach (var imp in modImports)
+        {
+            var key = imp.Trim();
+            if (!dedup.Add(key)) continue;
+            normalizedImports.Add(imp.TrimEnd('\r', '\n') + newline);
+        }
+
+        var sb = new System.Text.StringBuilder(original.Length + 256);
+        for (int i = 0; i < origFirst; i++) sb.Append(origLines[i]);
+        foreach (var imp in normalizedImports) sb.Append(imp);
+        for (int i = origLast + 1; i < origLines.Count; i++) sb.Append(origLines[i]);
+
+        projected = sb.ToString();
+        return true;
+    }
+
+    private static (int first, int last) FindTopImportRange(List<string> lines)
+    {
+        int preambleEnd = FindPreambleEnd(lines);
+        int first = -1, last = -1;
+        for (int i = 0; i < preambleEnd; i++)
+        {
+            if (!IsImportDirective(lines[i])) continue;
+            if (first < 0) first = i;
+            last = i;
+        }
+        return (first, last);
+    }
+
+    private static List<string> CollectTopImportLines(List<string> lines)
+    {
+        int preambleEnd = FindPreambleEnd(lines);
+        var imports = new List<string>();
+        for (int i = 0; i < preambleEnd; i++)
+            if (IsImportDirective(lines[i]))
+                imports.Add(lines[i]);
+        return imports;
+    }
+
+    private static int FindPreambleEnd(List<string> lines)
+    {
+        for (int i = 0; i < lines.Count; i++)
+        {
+            var t = lines[i].Trim();
+            if (t.Length == 0 ||
+                t.StartsWith("//", StringComparison.Ordinal) ||
+                t.StartsWith("/*", StringComparison.Ordinal) ||
+                t.StartsWith("*", StringComparison.Ordinal) ||
+                t.StartsWith("#", StringComparison.Ordinal) ||
+                IsImportDirective(lines[i]))
+                continue;
+
+            return i;
+        }
+
+        return lines.Count;
+    }
+
+    private static bool IsImportDirective(string line)
+    {
+        var t = line.TrimStart();
+        return t.StartsWith("using ", StringComparison.Ordinal) ||
+               t.StartsWith("global using ", StringComparison.Ordinal) ||
+               t.StartsWith("extern alias ", StringComparison.Ordinal);
+    }
+
+    private static List<string> SplitLinesKeepEol(string text)
+    {
+        var lines = new List<string>();
+        if (string.IsNullOrEmpty(text)) return lines;
+
+        int start = 0;
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (text[i] == '\n')
+            {
+                lines.Add(text.Substring(start, i - start + 1));
+                start = i + 1;
+            }
+        }
+        if (start < text.Length)
+            lines.Add(text.Substring(start));
+
+        return lines;
+    }
+
+    private static string NormalizeBodyWithoutUsingLines(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+
+        var lines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+        var kept = new List<string>(lines.Length);
+
+        foreach (var line in lines)
+        {
+            var t = line.TrimStart();
+            if (t.StartsWith("using ", StringComparison.Ordinal) ||
+                t.StartsWith("global using ", StringComparison.Ordinal) ||
+                t.StartsWith("extern alias ", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // using 블록 주변 공백 차이는 무시하기 위해 빈 줄 제거
+            if (string.IsNullOrWhiteSpace(line))
+                continue;
+
+            kept.Add(line.TrimEnd());
+        }
+
+        return string.Join("\n", kept);
     }
 
     private static List<FileChange> ParseFileBlocksStandard(string llmOutput, RunData run)

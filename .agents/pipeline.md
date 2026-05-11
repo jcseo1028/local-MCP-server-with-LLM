@@ -109,8 +109,15 @@ Tool Registry가 프로젝트 코드 검색이 필요할 때 사용한다.
 ```
 summarize_current_code:
   → 템플릿 로드 (summarize_current_code.prompt.md)
-  → {{code}}, {{language}} 변수 치환
+   → {{code_section}} 변수 치환 (단건/멀티파일 공용)
   → LLM Sub-Pipeline (summaryModel 우선)
+
+organize_imports:
+   → 템플릿 로드 (organize_imports.prompt.md)
+   → {{files_context}}, {{single_code_section}} 변수 치환
+   → 멀티파일 모드에서 [FILE:] 블록 출력 강제
+   → RunOrchestrator에서 using/import 외 본문 변경 검증 + import 블록 자동 보정
+   → LLM Sub-Pipeline (defaultModel)
 
 search_project_code:
   → Code Search Sub-Pipeline (프롬프트 불필요, 인덱스 직접 검색)
