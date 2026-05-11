@@ -132,6 +132,12 @@ namespace LocalMcpVsExtension.Services
 
         /// <summary>승인/거부 버튼 패널 참조</summary>
         public object? ApprovalPanel { get; set; }
+
+        /// <summary>v2.6: 승인 대신 확정/되돌리기 API를 사용해야 하는지 여부.</summary>
+        public bool UseConfirmRevert { get; set; }
+
+        /// <summary>v2.6: 현재 pending patch 식별자.</summary>
+        public string? PendingPatchId { get; set; }
     }
 
     internal sealed class CodeChangeInfo

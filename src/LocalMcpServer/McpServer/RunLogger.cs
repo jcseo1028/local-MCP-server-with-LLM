@@ -107,6 +107,22 @@ public sealed class RunLogger
         AppendLog(runId, sb.ToString());
     }
 
+    /// <summary>멀티파일 재시도 응답 기록.</summary>
+    public void LogToolRetry(string runId, string toolName, string retryResponse, bool retrySuccess)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"### 재시도 (파싱 성공: {retrySuccess})");
+        var preview = retryResponse.Length > 3000
+            ? retryResponse[..3000] + $"\n...(총 {retryResponse.Length}자 중 3000자 표시)"
+            : retryResponse;
+        sb.AppendLine("```");
+        sb.AppendLine(preview);
+        sb.AppendLine("```");
+        sb.AppendLine();
+
+        AppendLog(runId, sb.ToString());
+    }
+
     /// <summary>최종 요약 기록.</summary>
     public void LogFinalSummary(string runId, RunData run)
     {

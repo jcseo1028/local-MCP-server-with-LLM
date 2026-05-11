@@ -1,4 +1,6 @@
 using LocalMcpServer.LlmConnector;
+using LocalMcpServer.Configuration;
+using Microsoft.Extensions.Options;
 
 namespace LocalMcpServer.ToolRegistry;
 
@@ -8,8 +10,8 @@ namespace LocalMcpServer.ToolRegistry;
 /// </summary>
 public sealed class FixCodeIssuesTool : CodeToolBase
 {
-    public FixCodeIssuesTool(OllamaConnector llm, PromptTemplateLoader promptLoader)
-        : base(llm, promptLoader) { }
+    public FixCodeIssuesTool(OllamaConnector llm, PromptTemplateLoader promptLoader, IOptions<ServerConfig> config)
+        : base(llm, promptLoader, config) { }
 
     public override string Name => "fix_code_issues";
 

@@ -278,6 +278,7 @@ Chat Pipeline을 다단계 오케스트레이션으로 확장한다. (contracts.
    │      → IntentResolver.GeneratePlan()
    │      → LLM Connector (로컬 전용, GeneralModel 사용)
    │      ← planItems (최대 5개)
+   │      → allowMultiToolPlan=true이면 tool plan(step 목록) 구성 (maxPlanSteps 상한)
    │
    ├─ 4c. context_collection (컨텍스트수집)
    │      → 서버 측 컨텍스트 정규화 (코드 크기 검증 — 32KB 초과 시 절단, 부족 정보 판단)
@@ -303,6 +304,8 @@ Chat Pipeline을 다단계 오케스트레이션으로 확장한다. (contracts.
    │  → diff 미리보기 + "✅ 승인" / "❌ 거부" 버튼 표시
    │  → 승인: POST /api/chat/runs/{runId}/approval (approved=true)
    │  → 거부: POST /api/chat/runs/{runId}/approval (approved=false) → Rejected
+   │  → (v2.6) 임시 적용 확정: POST /api/chat/runs/{runId}/confirm (patchId)
+   │  → (v2.6) 임시 적용 되돌리기: POST /api/chat/runs/{runId}/revert (patchId)
    │
    ▼
 7. [VS Extension] 승인 후 클라이언트 측 실행
@@ -321,6 +324,7 @@ Chat Pipeline을 다단계 오케스트레이션으로 확장한다. (contracts.
    ▼
 8. [VS Extension] → [MCP Server] POST /api/chat/runs/{runId}/client-result
    │  적용/빌드/테스트 결과 보고
+   │  (v2.6) 남은 plan step이 있으면 다음 도구 step 실행으로 복귀
    │
    ▼
 9. [MCP Server] final_summary (결과요약)

@@ -1,4 +1,6 @@
 using LocalMcpServer.LlmConnector;
+using LocalMcpServer.Configuration;
+using Microsoft.Extensions.Options;
 
 namespace LocalMcpServer.ToolRegistry;
 
@@ -9,8 +11,8 @@ namespace LocalMcpServer.ToolRegistry;
 /// </summary>
 public sealed class RefactorCurrentCodeTool : CodeToolBase
 {
-    public RefactorCurrentCodeTool(OllamaConnector llm, PromptTemplateLoader promptLoader)
-        : base(llm, promptLoader) { }
+    public RefactorCurrentCodeTool(OllamaConnector llm, PromptTemplateLoader promptLoader, IOptions<ServerConfig> config)
+        : base(llm, promptLoader, config) { }
 
     public override string Name => "refactor_current_code";
 

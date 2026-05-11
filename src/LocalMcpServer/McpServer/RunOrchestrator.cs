@@ -20,6 +20,9 @@ public sealed class RunOrchestrator
     private readonly ILogger<RunOrchestrator> _logger;
     private readonly RunLogger _runLogger;
     private readonly ChatSection _chatConfig;
+    private static readonly TimeSpan RunTimeout = TimeSpan.FromMinutes(20);
+    private static readonly TimeSpan StepExecutionBudget = TimeSpan.FromMinutes(8);
+    private static readonly TimeSpan MultiFileRetryMinBudget = TimeSpan.FromSeconds(180);
 
     public RunOrchestrator(
         IConversationStore store,
@@ -59,7 +62,9 @@ public sealed class RunOrchestrator
             ActiveFilePath = req.ActiveFilePath,
             SolutionPath = req.SolutionPath,
             IntentAndPlanOnly = req.IntentAndPlanOnly || _chatConfig.IntentAndPlanOnly,
-            Files = req.Files  // v2.2 멀티 파일 컨텍스트
+            Files = req.Files,  // v2.2 멀티 파일 컨텍스트
+            AllowMultiToolPlan = req.AllowMultiToolPlan,
+            MaxPlanSteps = Math.Clamp(req.MaxPlanSteps ?? 3, 1, 5)
         };
 
         _store.AddRun(run);
@@ -82,16 +87,37 @@ public sealed class RunOrchestrator
     /// </summary>
     public void ProcessApproval(RunData run, bool approved)
     {
+        EndPause(run);
         var stage = run.GetStage(StageIds.Approval);
 
         if (approved)
         {
+            if (run.PendingPatch is not null)
+                run.PendingPatch.State = PendingPatchState.Confirmed;
+
+            if (run.PlanSteps.Count > 0 &&
+                run.CurrentStepIndex >= 0 &&
+                run.CurrentStepIndex < run.PlanSteps.Count)
+            {
+                run.PlanSteps[run.CurrentStepIndex].Status = PlanStepStatus.Completed;
+            }
+
             stage.Complete("승인됨");
             run.State = RunState.Running;
             _ = Task.Run(() => ExecutePostApprovalAsync(run));
         }
         else
         {
+            if (run.PendingPatch is not null)
+                run.PendingPatch.State = PendingPatchState.Reverted;
+
+            if (run.PlanSteps.Count > 0 &&
+                run.CurrentStepIndex >= 0 &&
+                run.CurrentStepIndex < run.PlanSteps.Count)
+            {
+                run.PlanSteps[run.CurrentStepIndex].Status = PlanStepStatus.Reverted;
+            }
+
             stage.Fail("거부됨");
             run.State = RunState.Rejected;
 
@@ -102,11 +128,38 @@ public sealed class RunOrchestrator
         }
     }
 
+    public bool ProcessConfirm(RunData run, string patchId)
+    {
+        if (run.PendingPatch is null ||
+            run.PendingPatch.State != PendingPatchState.Pending ||
+            !string.Equals(run.PendingPatch.PatchId, patchId, StringComparison.Ordinal))
+            return false;
+
+        ProcessApproval(run, true);
+        return true;
+    }
+
+    public bool ProcessRevert(RunData run, string patchId, string? reason)
+    {
+        if (run.PendingPatch is null ||
+            run.PendingPatch.State != PendingPatchState.Pending ||
+            !string.Equals(run.PendingPatch.PatchId, patchId, StringComparison.Ordinal))
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(reason))
+            _logger.LogInformation("Run {RunId} 되돌리기 요청: {Reason}", run.RunId, reason);
+
+        ProcessApproval(run, false);
+        return true;
+    }
+
     /// <summary>
     /// VSIX에서 build/test 결과를 수신하여 파이프라인을 완료한다.
     /// </summary>
     public async Task ProcessClientResultAsync(RunData run, ChatRunClientResultRequest result)
     {
+        EndPause(run);
+
         // build_test 단계 완료
         var buildStage = run.GetStage(StageIds.BuildTest);
         if (result.Build.Attempted)
@@ -125,8 +178,83 @@ public sealed class RunOrchestrator
             buildStage.Skip("빌드/테스트 미실행");
         }
 
+        // 빌드/테스트 실패 시 후속 step으로 진행하지 않고 즉시 실패 종료한다.
+        var failReason = GetClientResultFailureReason(result);
+        if (!string.IsNullOrWhiteSpace(failReason))
+        {
+            FailRunAfterClientResult(run, failReason);
+            return;
+        }
+
+        // 다중 계획 모드에서 다음 step이 있으면 계속 실행
+        run.PendingPatch = null;
+        if (run.PlanSteps.Count > 0 && run.CurrentStepIndex < run.PlanSteps.Count - 1)
+        {
+            run.CurrentStepIndex++;
+            var remaining = GetRemainingRunBudget(run);
+            if (remaining <= TimeSpan.Zero)
+                throw new OperationCanceledException("Run execution budget exceeded.");
+
+            using var cts = new CancellationTokenSource(remaining);
+            var completed = await ExecutePlanFromCurrentStepAsync(run, cts.Token);
+
+            if (!completed)
+            {
+                var approvalStage = run.GetStage(StageIds.Approval);
+                approvalStage.Start();
+                run.State = RunState.WaitingForApproval;
+                StartPause(run);
+                return;
+            }
+        }
+
         // 최종 요약
         await GenerateFinalSummaryAsync(run);
+    }
+
+    private static string? GetClientResultFailureReason(ChatRunClientResultRequest result)
+    {
+        if (!result.Applied)
+            return string.IsNullOrWhiteSpace(result.ApplyMessage)
+                ? "클라이언트 코드 적용 실패"
+                : $"클라이언트 코드 적용 실패: {result.ApplyMessage}";
+
+        if (result.Build.Attempted && result.Build.Succeeded == false)
+            return string.IsNullOrWhiteSpace(result.Build.Summary)
+                ? "클라이언트 빌드 실패"
+                : $"클라이언트 빌드 실패: {result.Build.Summary}";
+
+        if (result.Tests.Attempted && result.Tests.Succeeded == false)
+            return string.IsNullOrWhiteSpace(result.Tests.Summary)
+                ? "클라이언트 테스트 실패"
+                : $"클라이언트 테스트 실패: {result.Tests.Summary}";
+
+        return null;
+    }
+
+    private void FailRunAfterClientResult(RunData run, string reason)
+    {
+        run.PendingPatch = null;
+        run.State = RunState.Failed;
+        run.Error = reason;
+
+        if (run.PlanSteps.Count > 0 &&
+            run.CurrentStepIndex >= 0 &&
+            run.CurrentStepIndex < run.PlanSteps.Count)
+        {
+            var step = run.PlanSteps[run.CurrentStepIndex];
+            step.Status = PlanStepStatus.Failed;
+            step.ResultSummary = reason;
+        }
+
+        foreach (var stage in run.Stages)
+        {
+            if (stage.Status == StageStatus.InProgress)
+                stage.Fail(reason);
+        }
+
+        _logger.LogWarning("Run {RunId} 클라이언트 결과로 실패 종료: {Reason}", run.RunId, reason);
+        _runLogger.LogFinalSummary(run.RunId, run);
     }
 
     private async Task ExecutePipelineAsync(RunData run)
@@ -134,7 +262,11 @@ public sealed class RunOrchestrator
         try
         {
             run.State = RunState.Running;
-            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var remaining = GetRemainingRunBudget(run);
+            if (remaining <= TimeSpan.Zero)
+                throw new OperationCanceledException("Run execution budget exceeded.");
+
+            using var cts = new CancellationTokenSource(remaining);
             var ct = cts.Token;
 
             // 1. 의도 분석
@@ -150,6 +282,7 @@ public sealed class RunOrchestrator
             var planResult = await _intent.GeneratePlanAsync(run.Intent, run.Message, run.Code, run.Language, ct);
             run.PlanItems = planResult.Items;
             run.PlanRawLlmResponse = planResult.RawResponse;
+            InitializePlan(run);
             s2.Complete($"{run.PlanItems.Count}개 항목");
             _runLogger.LogPlan(run.RunId, run.PlanItems, run.PlanRawLlmResponse);
 
@@ -195,15 +328,16 @@ public sealed class RunOrchestrator
             // 5. 수정안 생성
             var s5 = run.GetStage(StageIds.ProposalGeneration);
             s5.Start();
-            await GenerateProposalAsync(run, ct);
+            var completed = await ExecutePlanFromCurrentStepAsync(run, ct);
             s5.Complete(run.Proposal?.Summary ?? "응답 생성 완료");
 
             // 6. 승인 단계 — 코드 수정 도구인 경우만
             var s6 = run.GetStage(StageIds.Approval);
-            if (run.Proposal is { RequiresApproval: true })
+            if (!completed && run.Proposal is { RequiresApproval: true })
             {
                 s6.Start();
                 run.State = RunState.WaitingForApproval;
+                StartPause(run);
                 _logger.LogInformation("Run {RunId} 승인 대기 중", run.RunId);
                 // 여기서 중단 — 클라이언트가 POST /approval 로 재개
                 return;
@@ -218,9 +352,18 @@ public sealed class RunOrchestrator
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning("Run {RunId} 취소됨 (타임아웃 또는 서버 종료)", run.RunId);
+            if (GetRemainingRunBudget(run) <= TimeSpan.Zero)
+            {
+                _logger.LogWarning("Run {RunId} 타임아웃 취소됨 (limit={LimitMinutes}분)", run.RunId, RunTimeout.TotalMinutes);
+                run.Error = "작업이 취소되었습니다. 실행 제한 시간(20분)을 초과했습니다.";
+            }
+            else
+            {
+                _logger.LogWarning("Run {RunId} 외부 취소됨 (서버 중단/요청 취소)", run.RunId);
+                run.Error = "작업이 취소되었습니다. 서버가 중단되었거나 요청이 취소되었습니다.";
+            }
+
             run.State = RunState.Failed;
-            run.Error = "작업이 취소되었습니다. LLM 응답 시간이 초과되었거나 서버가 종료되었습니다.";
 
             // 진행 중인 단계를 실패로 전환
             foreach (var stage in run.Stages)
@@ -241,7 +384,7 @@ public sealed class RunOrchestrator
     {
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
 
             // 7. 적용 단계 — VSIX 클라이언트 측에서 수행, 서버는 상태만 기록
             var s7 = run.GetStage(StageIds.Applying);
@@ -262,6 +405,7 @@ public sealed class RunOrchestrator
                 s8.Start();
                 // 클라이언트가 빌드/테스트 수행 후 POST client-result로 완료
                 _logger.LogInformation("Run {RunId} 클라이언트 빌드/테스트 대기 중", run.RunId);
+                StartPause(run);
                 return;
             }
             else
@@ -319,7 +463,138 @@ public sealed class RunOrchestrator
         _logger.LogInformation("Run {RunId} 의도/계획 검증 모드 완료", run.RunId);
     }
 
-    private async Task GenerateProposalAsync(RunData run, CancellationToken ct)
+    private void InitializePlan(RunData run)
+    {
+        var seed = run.Intent?.ToolName;
+        var tools = BuildToolPlan(run.Message, seed, run.AllowMultiToolPlan, run.MaxPlanSteps);
+        run.PlanSteps = tools.Select((t, i) => new RunPlanStep
+        {
+            StepId = $"step-{i + 1}",
+            ToolName = t,
+            Status = PlanStepStatus.Pending
+        }).ToList();
+
+        run.ExecutionMode = run.PlanSteps.Count > 1 ? PlanExecutionMode.Multi : PlanExecutionMode.Single;
+        run.CurrentStepIndex = 0;
+    }
+
+    private async Task<bool> ExecutePlanFromCurrentStepAsync(RunData run, CancellationToken ct)
+    {
+        if (run.PlanSteps.Count == 0)
+        {
+            var remaining = GetRemainingRunBudget(run);
+            if (remaining <= TimeSpan.Zero)
+                throw new OperationCanceledException("Run execution budget exceeded.");
+
+            var budget = remaining < StepExecutionBudget ? remaining : StepExecutionBudget;
+            using var stepCts = new CancellationTokenSource(budget);
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, stepCts.Token);
+
+            await GenerateProposalAsync(run, linkedCts.Token, run.Intent?.ToolName);
+            return run.Proposal is not { RequiresApproval: true };
+        }
+
+        for (int i = run.CurrentStepIndex; i < run.PlanSteps.Count; i++)
+        {
+            run.CurrentStepIndex = i;
+            var step = run.PlanSteps[i];
+            step.Status = PlanStepStatus.Running;
+
+            var remaining = GetRemainingRunBudget(run);
+            if (remaining <= TimeSpan.Zero)
+                throw new OperationCanceledException("Run execution budget exceeded.");
+
+            var budget = remaining < StepExecutionBudget ? remaining : StepExecutionBudget;
+            using var stepCts = new CancellationTokenSource(budget);
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, stepCts.Token);
+
+            await GenerateProposalAsync(run, linkedCts.Token, step.ToolName);
+            step.ResultSummary = run.Proposal?.Summary;
+            step.RequiresApproval = run.Proposal?.RequiresApproval == true;
+
+            if (run.Proposal is { RequiresApproval: true })
+            {
+                step.Status = PlanStepStatus.WaitingConfirm;
+                run.PendingPatch = BuildPendingPatch(run, step);
+                return false;
+            }
+
+            step.Status = PlanStepStatus.Completed;
+        }
+
+        return true;
+    }
+
+    private static PendingPatch? BuildPendingPatch(RunData run, RunPlanStep step)
+    {
+        if (run.Proposal is null || !run.Proposal.RequiresApproval)
+            return null;
+
+        var patch = new PendingPatch
+        {
+            RunId = run.RunId,
+            StepId = step.StepId,
+            State = PendingPatchState.Pending
+        };
+
+        if (run.Proposal.Changes is { Count: > 0 })
+        {
+            patch.Files = run.Proposal.Changes.Select(c => new FileChange
+            {
+                FilePath = c.FilePath,
+                Original = c.Original,
+                Modified = c.Modified,
+                SelectionOnly = c.SelectionOnly,
+                IsNewFile = c.IsNewFile,
+                Description = c.Description,
+                Hunks = c.Hunks
+            }).ToList();
+        }
+        else if (run.Proposal.Original is not null || run.Proposal.Modified is not null)
+        {
+            patch.Files.Add(new FileChange
+            {
+                FilePath = run.ActiveFilePath ?? "(active)",
+                Original = run.Proposal.Original ?? "",
+                Modified = run.Proposal.Modified ?? "",
+                SelectionOnly = run.SelectionOnly,
+                IsNewFile = false,
+                Description = null,
+                Hunks = null
+            });
+        }
+
+        return patch;
+    }
+
+    private static List<string> BuildToolPlan(string message, string? seedToolName, bool allowMultiToolPlan, int maxPlanSteps)
+    {
+        var plan = new List<string>();
+        if (!string.IsNullOrWhiteSpace(seedToolName))
+            plan.Add(seedToolName!);
+
+        if (!allowMultiToolPlan)
+            return plan;
+
+        var msg = (message ?? string.Empty).ToLowerInvariant();
+        void AddIf(string tool, params string[] keywords)
+        {
+            if (plan.Count >= maxPlanSteps) return;
+            if (plan.Contains(tool, StringComparer.OrdinalIgnoreCase)) return;
+            if (keywords.Any(k => msg.Contains(k)))
+                plan.Add(tool);
+        }
+
+        AddIf("organize_imports", "using", "import", "네임스페이스");
+        AddIf("add_comments", "주석", "comment", "문서화");
+        AddIf("refactor_current_code", "리팩터", "리팩토링", "refactor");
+        AddIf("fix_code_issues", "버그", "오류", "고쳐", "fix");
+        AddIf("summarize_current_code", "요약", "설명", "정리해줘");
+
+        return plan.Take(maxPlanSteps).ToList();
+    }
+
+    private async Task GenerateProposalAsync(RunData run, CancellationToken ct, string? toolName)
     {
         if (run.Intent is null)
         {
@@ -327,11 +602,17 @@ public sealed class RunOrchestrator
             return;
         }
 
-        if (run.Intent.ToolName is not null && run.Intent.Confidence >= 0.5)
+        if (toolName is not null && run.Intent.Confidence >= 0.5)
         {
-            var tool = _registry.GetTool(run.Intent.ToolName);
+            var tool = _registry.GetTool(toolName);
             if (tool is not null)
             {
+                if (IntentResolver.IsEditTool(toolName) && run.Files is { Count: > 0 })
+                {
+                    await GeneratePerFileProposalAsync(run, toolName, tool, ct);
+                    return;
+                }
+
                 var filesContext = BuildFilesContext(run);
                 var arguments = new Dictionary<string, object?>
                 {
@@ -342,9 +623,9 @@ public sealed class RunOrchestrator
 
                 var toolResult = await tool.ExecuteAsync(arguments, ct);
                 var resultText = toolResult.Content.FirstOrDefault()?.Text ?? "(결과 없음)";
-                _runLogger.LogToolExecution(run.RunId, run.Intent.ToolName, resultText);
+                _runLogger.LogToolExecution(run.RunId, toolName, resultText);
 
-                if (IntentResolver.IsEditTool(run.Intent.ToolName) && run.Code is not null)
+                if (IntentResolver.IsEditTool(toolName) && run.Code is not null)
                 {
                     var modifiedCode = ExtractCodeFromResult(resultText);
 
@@ -352,7 +633,7 @@ public sealed class RunOrchestrator
                     var fileChanges = ParseFileBlocks(resultText, run);
                     if (fileChanges.Count > 0)
                     {
-                        if (IsOrganizeImportsTool(run.Intent.ToolName) &&
+                        if (IsOrganizeImportsTool(toolName) &&
                             !EnforceOrganizeImportsOnly(fileChanges, out var validationError))
                         {
                             run.Proposal = new RunProposal
@@ -365,7 +646,7 @@ public sealed class RunOrchestrator
 
                         run.Proposal = new RunProposal
                         {
-                            Summary = $"{run.Intent.ToolName} 수정안 생성 ({fileChanges.Count}개 파일)",
+                            Summary = $"{toolName} 수정안 생성 ({fileChanges.Count}개 파일)",
                             Changes = fileChanges,
                             RequiresApproval = true
                         };
@@ -373,6 +654,22 @@ public sealed class RunOrchestrator
                     else if (!string.IsNullOrEmpty(filesContext))
                     {
                         // SC-4: 멀티파일 입력이 있었는데 [FILE:] 파싱 실패 → 1회 재시도
+                        var remaining = GetRemainingRunBudget(run);
+                        if (remaining <= MultiFileRetryMinBudget)
+                        {
+                            _logger.LogWarning(
+                                "Run {RunId} 멀티파일 재시도 생략: 남은 예산 부족 (remaining={RemainingMs}ms)",
+                                run.RunId,
+                                Math.Max(0, (int)remaining.TotalMilliseconds));
+                            run.Proposal = new RunProposal
+                            {
+                                Summary = "멀티파일 수정안 생성 중단: 실행 시간 예산이 부족합니다. " +
+                                          "파일 수를 줄이거나 단일 파일로 다시 시도해 주세요.",
+                                RequiresApproval = false
+                            };
+                            return;
+                        }
+
                         _logger.LogWarning("Run {RunId} 멀티파일 파싱 실패, 출력 포맷 강제 후 재시도", run.RunId);
                         var retryArgs = new Dictionary<string, object?>(arguments)
                         {
@@ -382,10 +679,11 @@ public sealed class RunOrchestrator
                         var retryResult = await tool.ExecuteAsync(retryArgs, ct);
                         var retryText = retryResult.Content.FirstOrDefault()?.Text ?? "";
                         var retryChanges = ParseFileBlocks(retryText, run);
+                        _runLogger.LogToolRetry(run.RunId, toolName, retryText, retryChanges.Count > 0);
 
                         if (retryChanges.Count > 0)
                         {
-                            if (IsOrganizeImportsTool(run.Intent.ToolName) &&
+                            if (IsOrganizeImportsTool(toolName) &&
                                 !EnforceOrganizeImportsOnly(retryChanges, out var retryValidationError))
                             {
                                 run.Proposal = new RunProposal
@@ -398,7 +696,7 @@ public sealed class RunOrchestrator
 
                             run.Proposal = new RunProposal
                             {
-                                Summary = $"{run.Intent.ToolName} 수정안 생성 ({retryChanges.Count}개 파일)",
+                                Summary = $"{toolName} 수정안 생성 ({retryChanges.Count}개 파일)",
                                 Changes = retryChanges,
                                 RequiresApproval = true
                             };
@@ -418,7 +716,7 @@ public sealed class RunOrchestrator
                     else
                     {
                         var singleModified = modifiedCode ?? resultText;
-                        if (IsOrganizeImportsTool(run.Intent.ToolName) &&
+                        if (IsOrganizeImportsTool(toolName) &&
                             run.Code is not null &&
                             !EnforceOrganizeImportsSingle(run.Code, singleModified, out singleModified, out var singleValidationError))
                         {
@@ -432,7 +730,7 @@ public sealed class RunOrchestrator
 
                         run.Proposal = new RunProposal
                         {
-                            Summary = $"{run.Intent.ToolName} 수정안 생성",
+                            Summary = $"{toolName} 수정안 생성",
                             Original = run.Code,
                             Modified = singleModified,
                             RequiresApproval = true
@@ -452,7 +750,7 @@ public sealed class RunOrchestrator
             {
                 run.Proposal = new RunProposal
                 {
-                    Summary = $"도구 '{run.Intent.ToolName}'을(를) 찾을 수 없습니다."
+                    Summary = $"도구 '{toolName}'을(를) 찾을 수 없습니다."
                 };
             }
         }
@@ -470,6 +768,89 @@ public sealed class RunOrchestrator
                 RequiresApproval = false
             };
         }
+    }
+
+    private async Task GeneratePerFileProposalAsync(RunData run, string toolName, IMcpTool tool, CancellationToken ct)
+    {
+        var fileChanges = new List<FileChange>();
+        var changedFilePaths = new List<string>();
+
+        foreach (var file in run.Files ?? [])
+        {
+            var sourceCode = file.SelectedCode ?? file.Code;
+            var language = file.Language ?? run.Language ?? "";
+            var arguments = new Dictionary<string, object?>
+            {
+                ["code"] = sourceCode,
+                ["language"] = language,
+                ["files_context"] = "",
+                ["related_files_context"] = BuildRelatedFilesContext(run, file.FilePath)
+            };
+
+            var toolResult = await tool.ExecuteAsync(arguments, ct);
+            var resultText = toolResult.Content.FirstOrDefault()?.Text ?? "(결과 없음)";
+            _runLogger.LogToolExecution(run.RunId, $"{toolName}:{Path.GetFileName(file.FilePath)}", resultText);
+
+            var modifiedCode = ExtractCodeFromResult(resultText) ?? resultText;
+            if (IsOrganizeImportsTool(toolName) &&
+                !EnforceOrganizeImportsSingle(sourceCode, modifiedCode, out modifiedCode, out var validationError))
+            {
+                run.Proposal = new RunProposal
+                {
+                    Summary = $"using/import 정리 검증 실패: {file.FilePath} — {validationError}",
+                    RequiresApproval = false
+                };
+                return;
+            }
+
+            if (string.Equals(sourceCode, modifiedCode, StringComparison.Ordinal))
+                continue;
+
+            fileChanges.Add(BuildFileChange(file, modifiedCode));
+            changedFilePaths.Add(file.FilePath);
+        }
+
+        if (fileChanges.Count == 0)
+        {
+            run.Proposal = new RunProposal
+            {
+                Summary = $"{toolName} 변경 없음",
+                RequiresApproval = false
+            };
+            return;
+        }
+
+        run.Proposal = new RunProposal
+        {
+            Summary = $"{toolName} 수정안 생성 ({fileChanges.Count}개 파일)",
+            Changes = fileChanges,
+            RequiresApproval = true
+        };
+    }
+
+    private static void StartPause(RunData run)
+    {
+        if (run.PauseStartedAt is null)
+            run.PauseStartedAt = DateTime.UtcNow;
+    }
+
+    private static void EndPause(RunData run)
+    {
+        if (run.PauseStartedAt is DateTime started)
+        {
+            run.PausedDuration += DateTime.UtcNow - started;
+            run.PauseStartedAt = null;
+        }
+    }
+
+    private static TimeSpan GetRemainingRunBudget(RunData run)
+    {
+        var elapsed = DateTime.UtcNow - run.CreatedAt - run.PausedDuration;
+        if (run.PauseStartedAt is DateTime pauseStart)
+            elapsed -= (DateTime.UtcNow - pauseStart);
+
+        var remaining = RunTimeout - elapsed;
+        return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
     }
 
     private async Task GenerateFinalSummaryAsync(RunData run)
@@ -492,7 +873,7 @@ public sealed class RunOrchestrator
 
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(6));
             var summary = await _intent.GenerateSummaryAsync(
                 run.Message,
                 run.Intent ?? new IntentResult(),
@@ -525,6 +906,8 @@ public sealed class RunOrchestrator
     // B-5: 파일별/전체 최대 문자 수 제한 (토큰 초과 대응)
     private const int MaxPerFileChars  = 8_000;   // ≈2000 tokens/file
     private const int MaxTotalChars    = 32_000;  // ≈8000 tokens total
+    private const int MaxRelatedFiles  = 3;
+    private const int MaxRelatedChars  = 4_000;
 
     private static string BuildFilesContext(RunData run)
     {
@@ -584,6 +967,91 @@ public sealed class RunOrchestrator
         }
 
         return sb.ToString();
+    }
+
+    private static string BuildRelatedFilesContext(RunData run, string currentFilePath)
+    {
+        if (run.Files == null || run.Files.Count <= 1)
+            return string.Empty;
+
+        var relatedFiles = run.Files
+            .Where(f => !f.FilePath.Equals(currentFilePath, StringComparison.OrdinalIgnoreCase))
+            .Take(MaxRelatedFiles)
+            .ToList();
+        if (relatedFiles.Count == 0)
+            return string.Empty;
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("## 관련 파일 요약");
+        sb.AppendLine("다음 파일들은 참고용이다. 이 요청에서는 현재 파일만 수정하고, 다른 파일 코드는 출력하지 않는다.");
+        sb.AppendLine();
+
+        foreach (var file in relatedFiles)
+        {
+            sb.AppendLine($"### {file.FilePath}");
+            var summary = SummarizeFileForContext(file.SelectedCode ?? file.Code);
+            sb.AppendLine(summary);
+            sb.AppendLine();
+
+            if (sb.Length >= MaxRelatedChars)
+                break;
+        }
+
+        if (sb.Length > MaxRelatedChars)
+            return sb.ToString(0, MaxRelatedChars) + "\n...(생략)";
+
+        return sb.ToString();
+    }
+
+    private static string SummarizeFileForContext(string code)
+    {
+        if (string.IsNullOrWhiteSpace(code))
+            return "(코드 없음)";
+
+        var normalized = code.Replace("\r\n", "\n").Replace('\r', '\n');
+        var lines = normalized.Split('\n');
+        var picked = new List<string>();
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0)
+                continue;
+
+            if (IsRelevantContextLine(trimmed))
+                picked.Add(trimmed);
+
+            if (picked.Count >= 12)
+                break;
+        }
+
+        if (picked.Count == 0)
+        {
+            var preview = normalized.Length > 600 ? normalized[..600] + "\n...(생략)" : normalized;
+            return preview;
+        }
+
+        return string.Join("\n", picked);
+    }
+
+    private static bool IsRelevantContextLine(string line)
+    {
+        if (line.StartsWith("namespace ", StringComparison.Ordinal) ||
+            line.Contains(" class ", StringComparison.Ordinal) ||
+            line.Contains(" struct ", StringComparison.Ordinal) ||
+            line.Contains(" interface ", StringComparison.Ordinal) ||
+            line.Contains(" enum ", StringComparison.Ordinal))
+            return true;
+
+        if (!line.Contains('(', StringComparison.Ordinal) || !line.Contains(')', StringComparison.Ordinal))
+            return false;
+
+        return !line.StartsWith("if ", StringComparison.Ordinal) &&
+               !line.StartsWith("for ", StringComparison.Ordinal) &&
+               !line.StartsWith("foreach ", StringComparison.Ordinal) &&
+               !line.StartsWith("while ", StringComparison.Ordinal) &&
+               !line.StartsWith("switch ", StringComparison.Ordinal) &&
+               !line.StartsWith("catch", StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -876,6 +1344,30 @@ public sealed class RunOrchestrator
             Original = originalCode,
             Modified = modifiedCode,
             SelectionOnly = selectionOnly,
+            IsNewFile = string.IsNullOrEmpty(originalCode),
+            Description = null,
+            Hunks = hunks
+        };
+    }
+
+    private static FileChange BuildFileChange(FileContext file, string modifiedCode)
+    {
+        var originalCode = file.SelectedCode ?? file.Code;
+
+        DiffHunkInfo[]? hunks = null;
+        if (!string.IsNullOrEmpty(originalCode) && !string.IsNullOrEmpty(modifiedCode))
+        {
+            var computed = DiffEngine.Compute(originalCode, modifiedCode);
+            if (computed.Count > 0)
+                hunks = [.. computed];
+        }
+
+        return new FileChange
+        {
+            FilePath = file.FilePath,
+            Original = originalCode,
+            Modified = modifiedCode,
+            SelectionOnly = file.SelectionOnly,
             IsNewFile = string.IsNullOrEmpty(originalCode),
             Description = null,
             Hunks = hunks

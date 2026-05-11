@@ -163,6 +163,42 @@ namespace LocalMcpVsExtension.Services
         }
 
         /// <summary>
+        /// Run 임시 적용을 확정한다. (POST /api/chat/runs/{runId}/confirm)
+        /// </summary>
+        public async Task<RunSnapshot> SendRunConfirmAsync(string serverUrl, string runId, string patchId)
+        {
+            var request = new { patchId };
+            var json = JsonSerializer.Serialize(request, s_jsonOptions);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var response = await s_http.PostAsync(
+                $"{serverUrl}/api/chat/runs/{runId}/confirm", content).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+
+            var responseJson = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            return JsonSerializer.Deserialize<RunSnapshot>(responseJson, s_jsonOptions)
+                ?? new RunSnapshot();
+        }
+
+        /// <summary>
+        /// Run 임시 적용을 되돌린다. (POST /api/chat/runs/{runId}/revert)
+        /// </summary>
+        public async Task<RunSnapshot> SendRunRevertAsync(string serverUrl, string runId, string patchId, string? reason = null)
+        {
+            var request = new { patchId, reason };
+            var json = JsonSerializer.Serialize(request, s_jsonOptions);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var response = await s_http.PostAsync(
+                $"{serverUrl}/api/chat/runs/{runId}/revert", content).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+
+            var responseJson = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            return JsonSerializer.Deserialize<RunSnapshot>(responseJson, s_jsonOptions)
+                ?? new RunSnapshot();
+        }
+
+        /// <summary>
         /// 빌드/테스트 결과를 전송한다. (POST /api/chat/runs/{runId}/client-result)
         /// </summary>
         public async Task<RunSnapshot> SendClientResultAsync(
@@ -266,6 +302,8 @@ namespace LocalMcpVsExtension.Services
         public string? ActiveFilePath { get; set; }
         public string? SolutionPath { get; set; }
         public bool IntentAndPlanOnly { get; set; }
+        public bool AllowMultiToolPlan { get; set; }
+        public int? MaxPlanSteps { get; set; }
 
         // v2.2 멀티 파일 컨텍스트
         public RunFileContextDto[]? Files { get; set; }
@@ -283,6 +321,10 @@ namespace LocalMcpVsExtension.Services
         public string RunId { get; set; } = "";
         public string ConversationId { get; set; } = "";
         public string State { get; set; } = "";
+        public string ExecutionMode { get; set; } = "Single";
+        public int CurrentStepIndex { get; set; }
+        public RunPlanStepDto[] PlanSteps { get; set; } = Array.Empty<RunPlanStepDto>();
+        public PendingPatchDto? PendingPatch { get; set; }
         public DateTime CreatedAt { get; set; }
         public RunStageDto[] Stages { get; set; } = Array.Empty<RunStageDto>();
         public ChatIntent? Intent { get; set; }
@@ -301,6 +343,31 @@ namespace LocalMcpVsExtension.Services
         public string? Message { get; set; }
         public DateTime? StartedAt { get; set; }
         public DateTime? CompletedAt { get; set; }
+    }
+
+    internal sealed class RunPlanStepDto
+    {
+        public string StepId { get; set; } = "";
+        public string ToolName { get; set; } = "";
+        public string Status { get; set; } = "";
+        public bool RequiresApproval { get; set; }
+        public string? ResultSummary { get; set; }
+    }
+
+    internal sealed class PendingPatchDto
+    {
+        public string PatchId { get; set; } = "";
+        public string State { get; set; } = "";
+        public string? StepId { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public PendingPatchFileDto[] Files { get; set; } = Array.Empty<PendingPatchFileDto>();
+    }
+
+    internal sealed class PendingPatchFileDto
+    {
+        public string FilePath { get; set; } = "";
+        public string Original { get; set; } = "";
+        public string Modified { get; set; } = "";
     }
 
     internal sealed class RunReferenceDto

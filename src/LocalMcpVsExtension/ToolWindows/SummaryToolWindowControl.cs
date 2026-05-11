@@ -529,6 +529,8 @@ namespace LocalMcpVsExtension.ToolWindows
                     ConversationId = _conversationId ?? "",
                     ActiveFilePath = activeFilePath,
                     SolutionPath = solutionPath,
+                    AllowMultiToolPlan = true,
+                    MaxPlanSteps = 3,
                     Files = openFiles.Length > 0 ? openFiles : null
                 };
 
@@ -616,7 +618,7 @@ namespace LocalMcpVsExtension.ToolWindows
                                 foreach (var fc in snapshot.Proposal.Changes)
                                 {
                                     // A-2: 서버 사전 계산 hunks가 있으면 HunkSelections 미리 초기화
-                                    List<HunkSelection> preHunks = null;
+                                    List<HunkSelection>? preHunks = null;
                                     if (fc.Hunks != null && fc.Hunks.Length > 0)
                                     {
                                         preHunks = new List<HunkSelection>(fc.Hunks.Length);
@@ -646,6 +648,10 @@ namespace LocalMcpVsExtension.ToolWindows
                             }
 
                             runVm.Approval = ApprovalState.Pending;
+                            runVm.UseConfirmRevert = snapshot.PendingPatch != null
+                                && string.Equals(snapshot.PendingPatch.State, "Pending", StringComparison.OrdinalIgnoreCase)
+                                && !string.IsNullOrWhiteSpace(snapshot.PendingPatch.PatchId);
+                            runVm.PendingPatchId = snapshot.PendingPatch?.PatchId;
 
                             // UI 업데이트: diff + 승인 버튼 추가
                             RenderRunApproval(runVm, snapshot);
@@ -826,6 +832,44 @@ namespace LocalMcpVsExtension.ToolWindows
                 }
             }
 
+            // ── v2.6 도구 step 섹션 ──
+            if (snapshot.PlanSteps != null && snapshot.PlanSteps.Length > 0)
+            {
+                var stepPanel = panel.Children.OfType<Border>()
+                    .FirstOrDefault(b => b.Name == "ToolPlanSection");
+                if (stepPanel == null)
+                {
+                    stepPanel = CreateRunSection("ToolPlanSection", "\u2692 실행 단계", isDark);
+                    var refSect = panel.Children.OfType<Border>()
+                        .FirstOrDefault(b => b.Name == "RefSection");
+                    var planSect = panel.Children.OfType<Border>()
+                        .FirstOrDefault(b => b.Name == "PlanSection");
+                    InsertAfter(panel, refSect ?? planSect ?? (UIElement)timelinePanel, stepPanel);
+                }
+
+                var stepContent = stepPanel.Child as StackPanel;
+                if (stepContent != null)
+                {
+                    while (stepContent.Children.Count > 1)
+                        stepContent.Children.RemoveAt(stepContent.Children.Count - 1);
+
+                    for (int i = 0; i < snapshot.PlanSteps.Length; i++)
+                    {
+                        var step = snapshot.PlanSteps[i];
+                        var marker = i == snapshot.CurrentStepIndex ? "→" : " ";
+                        var line = new TextBlock
+                        {
+                            Text = $"{marker} {i + 1}. {step.ToolName} [{step.Status}]",
+                            FontSize = 11,
+                            TextWrapping = TextWrapping.Wrap,
+                            Foreground = new SolidColorBrush(fg),
+                            Margin = new Thickness(8, 1, 0, 1)
+                        };
+                        stepContent.Children.Add(line);
+                    }
+                }
+            }
+
             // ── 참조 섹션 (§9a) ──
             if (runVmData != null && runVmData.References.Count > 0)
             {
@@ -968,7 +1012,7 @@ namespace LocalMcpVsExtension.ToolWindows
 
             var btnApprove = new Button
             {
-                Content = "\u2705 확인",
+                Content = msg.UseConfirmRevert ? "\u2705 확정" : "\u2705 확인",
                 Padding = new Thickness(10, 4, 10, 4),
                 Margin = new Thickness(0, 0, 8, 0)
             };
@@ -988,7 +1032,7 @@ namespace LocalMcpVsExtension.ToolWindows
 
             var btnReject = new Button
             {
-                Content = "\u274C 거부",
+                Content = msg.UseConfirmRevert ? "\u274C 되돌리기" : "\u274C 거부",
                 Padding = new Thickness(10, 4, 10, 4)
             };
             btnReject.SetResourceReference(Control.BackgroundProperty, VsBrushes.ButtonFaceKey);
@@ -1012,6 +1056,7 @@ namespace LocalMcpVsExtension.ToolWindows
         private async Task ApproveRunChangeAsync(ChatMessageViewModel msg)
         {
             if (msg.CodeChange == null || msg.RunId == null) return;
+            var codeChange = msg.CodeChange;
 
             try
             {
@@ -1023,14 +1068,14 @@ namespace LocalMcpVsExtension.ToolWindows
                     return;
                 }
 
-                var modifiedCode = msg.CodeChange.Modified;
+                var modifiedCode = codeChange.Modified;
                 var snapshot = docView.TextBuffer.CurrentSnapshot;
                 modifiedCode = NormalizeNewlines(modifiedCode, snapshot);
                 modifiedCode = NormalizeIndentation(modifiedCode, snapshot);
 
                 // 적용 전 기본 검증: 잘린 코드 보호
-                var originalCode = msg.CodeChange.SelectionOnly
-                    ? msg.CodeChange.Original
+                var originalCode = codeChange.SelectionOnly
+                    ? codeChange.Original
                     : snapshot.GetText();
                 if (!string.IsNullOrEmpty(originalCode) && !string.IsNullOrEmpty(modifiedCode))
                 {
@@ -1042,7 +1087,8 @@ namespace LocalMcpVsExtension.ToolWindows
                         msg.Approval = ApprovalState.Rejected;
                         UpdateApprovalUI(msg);
                         var serverUrl2 = _txtServerUrl.Text.TrimEnd('/');
-                        await _client.SendRunApprovalAsync(serverUrl2, msg.RunId, false);
+                        await SendRunDecisionAsync(serverUrl2, msg.RunId, approve: false, msg.PendingPatchId,
+                            reason: "적용 전 검증 실패");
                         return;
                     }
                 }
@@ -1053,7 +1099,7 @@ namespace LocalMcpVsExtension.ToolWindows
 
                 try
                 {
-                    if (msg.CodeChange.IsMultiFile && msg.CodeChange.Files != null)
+                    if (codeChange.IsMultiFile && codeChange.Files != null)
                     {
                         // v2.2 / B-1 / B-3 / C-2: 파일별 선택 적용 + Atomic Rollback + ApplyResults 수집
                         var perFileResults = new System.Collections.Generic.List<FileApplyResultDto>();
@@ -1063,7 +1109,7 @@ namespace LocalMcpVsExtension.ToolWindows
                         var failedFiles = new System.Collections.Generic.List<string>();
                         bool breakProcessing = false;
 
-                        foreach (var fc in msg.CodeChange.Files)
+                        foreach (var fc in codeChange.Files)
                         {
                             if (breakProcessing) break;
 
@@ -1117,7 +1163,7 @@ namespace LocalMcpVsExtension.ToolWindows
                         }
 
                         // C-2: ApplyResults 보존
-                        msg.CodeChange.ApplyResults = perFileResults;
+                        codeChange.ApplyResults = perFileResults;
 
                         if (failedFiles.Count > 0)
                         {
@@ -1129,13 +1175,13 @@ namespace LocalMcpVsExtension.ToolWindows
                     else
                     {
                         // 단일 파일 경로 (기존 로직)
-                        var originalText = msg.CodeChange.SelectionOnly
-                            ? NormalizeNewlines(msg.CodeChange.Original ?? string.Empty, snapshot)
+                        var originalText = codeChange.SelectionOnly
+                            ? NormalizeNewlines(codeChange.Original ?? string.Empty, snapshot)
                             : snapshot.GetText();
 
                         // SelectionOnly: 문서 내 원본 위치(offset) 보정
                         int baseOffset = 0;
-                        if (msg.CodeChange.SelectionOnly && !string.IsNullOrEmpty(msg.CodeChange.Original))
+                        if (codeChange.SelectionOnly && !string.IsNullOrEmpty(codeChange.Original))
                         {
                             var fullText = snapshot.GetText();
                             baseOffset = fullText.IndexOf(originalText, StringComparison.Ordinal);
@@ -1152,7 +1198,7 @@ namespace LocalMcpVsExtension.ToolWindows
 
                         // A-1: HunkSelections이 있으면 선택된 hunk만 적용
                         IEnumerable<DiffHunk> hunksToApply;
-                        var hunkSels = msg.CodeChange?.HunkSelections;
+                        var hunkSels = codeChange.HunkSelections;
                         if (hunkSels != null && hunkSels.Count == allHunks.Count)
                             hunksToApply = allHunks.Where((h, i) => hunkSels[i].IsAccepted);
                         else
@@ -1182,7 +1228,7 @@ namespace LocalMcpVsExtension.ToolWindows
 
                             using (var edit = docView.TextBuffer.CreateEdit())
                             {
-                                if (msg.CodeChange.SelectionOnly && baseOffset >= 0)
+                                if (codeChange.SelectionOnly && baseOffset >= 0)
                                     edit.Replace(new Microsoft.VisualStudio.Text.Span(baseOffset, originalText.Length), resultText);
                                 else
                                     edit.Replace(new Microsoft.VisualStudio.Text.Span(0, snapshot.Length), resultText);
@@ -1202,9 +1248,9 @@ namespace LocalMcpVsExtension.ToolWindows
                 msg.Approval = ApprovalState.Approved;
                 UpdateApprovalUI(msg);
 
-                // 서버에 승인 알림
+                // 서버에 승인/확정 알림
                 var serverUrl = _txtServerUrl.Text.TrimEnd('/');
-                await _client.SendRunApprovalAsync(serverUrl, msg.RunId, true);
+                await SendRunDecisionAsync(serverUrl, msg.RunId, approve: true, msg.PendingPatchId, reason: null);
 
                 ClientResultRequest clientResult;
 
@@ -1216,7 +1262,7 @@ namespace LocalMcpVsExtension.ToolWindows
                     {
                         Applied = false,
                         ApplyMessage = applyErrorMsg,
-                        ApplyResults = msg.CodeChange?.ApplyResults?.ToArray(),
+                        ApplyResults = codeChange.ApplyResults?.ToArray(),
                         Build = new ClientBuildResult { Attempted = false, Summary = "적용 실패로 빌드 생략" },
                         Tests = new ClientTestResult { Attempted = false, Summary = "적용 실패로 테스트 생략" }
                     };
@@ -1230,7 +1276,7 @@ namespace LocalMcpVsExtension.ToolWindows
                     clientResult = new ClientResultRequest
                     {
                         Applied = true,
-                        ApplyResults = msg.CodeChange?.ApplyResults?.ToArray()
+                        ApplyResults = codeChange.ApplyResults?.ToArray()
                     };
                     var solutionPath = await GetSolutionPathAsync();
                     if (!string.IsNullOrEmpty(solutionPath))
@@ -1282,11 +1328,47 @@ namespace LocalMcpVsExtension.ToolWindows
             try
             {
                 var serverUrl = _txtServerUrl.Text.TrimEnd('/');
-                await _client.SendRunApprovalAsync(serverUrl, msg.RunId, false);
+                await SendRunDecisionAsync(serverUrl, msg.RunId, approve: false, msg.PendingPatchId,
+                    reason: "사용자 거부");
             }
             catch { /* 서버 통보 실패는 무시 */ }
 
             _txtStatus.Text = "변경이 거부되었습니다.";
+        }
+
+        private async Task SendRunDecisionAsync(string serverUrl, string runId, bool approve,
+            string? patchIdHint, string? reason)
+        {
+            string? patchId = patchIdHint;
+
+            try
+            {
+                if (string.IsNullOrWhiteSpace(patchId))
+                {
+                    var snapshot = await _client.GetRunAsync(serverUrl, runId);
+                    if (snapshot.PendingPatch != null &&
+                        string.Equals(snapshot.PendingPatch.State, "Pending", StringComparison.OrdinalIgnoreCase) &&
+                        !string.IsNullOrWhiteSpace(snapshot.PendingPatch.PatchId))
+                    {
+                        patchId = snapshot.PendingPatch.PatchId;
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(patchId))
+                {
+                    if (approve)
+                        await _client.SendRunConfirmAsync(serverUrl, runId, patchId!);
+                    else
+                        await _client.SendRunRevertAsync(serverUrl, runId, patchId!, reason);
+                    return;
+                }
+            }
+            catch
+            {
+                // confirm/revert 실패 시 하위 호환 approval로 폴백
+            }
+
+            await _client.SendRunApprovalAsync(serverUrl, runId, approve);
         }
 
         private async Task<string?> GetSolutionPathAsync()
@@ -1747,9 +1829,9 @@ namespace LocalMcpVsExtension.ToolWindows
                 stateText.SetResourceReference(TextBlock.ForegroundProperty, VsBrushes.ToolWindowTextKey);
 
                 if (msg.Approval == ApprovalState.Approved)
-                    stateText.Text = "\u2705 적용 완료";
+                    stateText.Text = msg.UseConfirmRevert ? "\u2705 확정 완료" : "\u2705 적용 완료";
                 else if (msg.Approval == ApprovalState.Rejected)
-                    stateText.Text = "\u274C 거부됨";
+                    stateText.Text = msg.UseConfirmRevert ? "\u274C 되돌림 완료" : "\u274C 거부됨";
 
                 panel.Children.Add(stateText);
             }

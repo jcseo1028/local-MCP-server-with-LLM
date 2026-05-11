@@ -1,4 +1,6 @@
 using LocalMcpServer.LlmConnector;
+using LocalMcpServer.Configuration;
+using Microsoft.Extensions.Options;
 
 namespace LocalMcpServer.ToolRegistry;
 
@@ -8,8 +10,8 @@ namespace LocalMcpServer.ToolRegistry;
 /// </summary>
 public sealed class AddCommentsTool : CodeToolBase
 {
-    public AddCommentsTool(OllamaConnector llm, PromptTemplateLoader promptLoader)
-        : base(llm, promptLoader) { }
+    public AddCommentsTool(OllamaConnector llm, PromptTemplateLoader promptLoader, IOptions<ServerConfig> config)
+        : base(llm, promptLoader, config) { }
 
     public override string Name => "add_comments";
 

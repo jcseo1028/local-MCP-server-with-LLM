@@ -42,6 +42,7 @@ public sealed class ToolsSection
 public sealed class ChatSection
 {
     public string? IntentModel { get; set; }
+    public string? ChatModel { get; set; }
     public int ConversationTimeoutMinutes { get; set; } = 30;
     public int MaxConversationHistory { get; set; } = 20;
     public bool IntentAndPlanOnly { get; set; } = false;

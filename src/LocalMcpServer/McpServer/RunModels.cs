@@ -24,6 +24,30 @@ public enum StageStatus
     Failed
 }
 
+public enum PlanExecutionMode
+{
+    Single,
+    Multi
+}
+
+public enum PlanStepStatus
+{
+    Pending,
+    Running,
+    WaitingConfirm,
+    Completed,
+    Failed,
+    Reverted
+}
+
+public enum PendingPatchState
+{
+    Pending,
+    Confirmed,
+    Reverted,
+    Expired
+}
+
 public static class StageIds
 {
     public const string IntentAnalysis = "intent_analysis";
@@ -109,6 +133,8 @@ public sealed class RunData
     public string? SolutionPath { get; set; }
     public bool IntentAndPlanOnly { get; set; }
     public List<FileContext>? Files { get; set; } // v2.2 멀티 파일 컨텍스트
+    public bool AllowMultiToolPlan { get; set; }
+    public int MaxPlanSteps { get; set; } = 3;
 
     // 단계
     public List<RunStage> Stages { get; set; } = StageIds.All
@@ -119,6 +145,12 @@ public sealed class RunData
     public IntentResult? Intent { get; set; }
     public List<string> PlanItems { get; set; } = [];
     public string? PlanRawLlmResponse { get; set; }
+    public List<RunPlanStep> PlanSteps { get; set; } = [];
+    public int CurrentStepIndex { get; set; }
+    public PlanExecutionMode ExecutionMode { get; set; } = PlanExecutionMode.Single;
+    public PendingPatch? PendingPatch { get; set; }
+    public TimeSpan PausedDuration { get; set; } = TimeSpan.Zero;
+    public DateTime? PauseStartedAt { get; set; }
     public List<DocumentReference> References { get; set; } = [];
     public RunProposal? Proposal { get; set; }
     public string? FinalSummary { get; set; }
@@ -149,6 +181,25 @@ public sealed class RunProposal
 
     /// <summary>true면 멀티 파일 모드로 동작</summary>
     public bool IsMultiFile => Changes != null && Changes.Count > 0;
+}
+
+public sealed class RunPlanStep
+{
+    public string StepId { get; set; } = Guid.NewGuid().ToString("N");
+    public string ToolName { get; set; } = "";
+    public PlanStepStatus Status { get; set; } = PlanStepStatus.Pending;
+    public string? ResultSummary { get; set; }
+    public bool RequiresApproval { get; set; }
+}
+
+public sealed class PendingPatch
+{
+    public string PatchId { get; set; } = Guid.NewGuid().ToString("N");
+    public string RunId { get; set; } = "";
+    public string? StepId { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public PendingPatchState State { get; set; } = PendingPatchState.Pending;
+    public List<FileChange> Files { get; set; } = [];
 }
 
 // --- API DTO ---
@@ -200,6 +251,8 @@ public sealed class ChatRunStartRequest
     public string? ActiveFilePath { get; set; }
     public string? SolutionPath { get; set; }
     public bool IntentAndPlanOnly { get; set; }
+    public bool AllowMultiToolPlan { get; set; }
+    public int? MaxPlanSteps { get; set; }
 
     // 멀티 파일 컨텍스트 — v2.2 (null이면 단건 필드 사용)
     public List<FileContext>? Files { get; set; }

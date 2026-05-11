@@ -62,9 +62,7 @@ public sealed class IntentResolver
                 ["language"] = language ?? "unknown"
             }, ct);
 
-            var intentModel = !string.IsNullOrEmpty(_config.Chat.IntentModel)
-                ? _config.Chat.IntentModel
-                : _config.Llm.GeneralModel;
+            var intentModel = ResolveIntentPlanModel();
 
             var llmRequest = new LlmRequest
             {
@@ -190,7 +188,7 @@ public sealed class IntentResolver
             ["history"] = history
         }, ct);
 
-        var generalModel = _config.Llm.GeneralModel;
+        var generalModel = ResolveChatModel();
 
         var llmRequest = new LlmRequest
         {
@@ -231,7 +229,7 @@ public sealed class IntentResolver
             {
                 SystemPrompt = systemPrompt,
                 Prompt = $"사용자 요청: \"{message}\"\n의도: {intent.Description}\n위 규칙에 따라 번호 목록만 출력하세요.",
-                Model = _config.Llm.GeneralModel,
+                Model = ResolveIntentPlanModel(),
                 Options = new LlmOptions
                 {
                     Temperature = 0.2,
@@ -271,7 +269,7 @@ public sealed class IntentResolver
             var llmRequest = new LlmRequest
             {
                 Prompt = prompt,
-                Model = _config.Llm.GeneralModel,
+                Model = ResolveSummaryModel(),
                 Options = new LlmOptions
                 {
                     Temperature = 0.3,
@@ -288,6 +286,31 @@ public sealed class IntentResolver
             _logger.LogWarning(ex, "요약 생성 실패");
             return approved == true ? "작업이 완료되었습니다." : "작업이 취소 또는 실패했습니다.";
         }
+    }
+
+    private string ResolveIntentPlanModel()
+    {
+        if (!string.IsNullOrWhiteSpace(_config.Chat.IntentModel))
+            return _config.Chat.IntentModel!;
+        if (!string.IsNullOrWhiteSpace(_config.Llm.GeneralModel))
+            return _config.Llm.GeneralModel!;
+        return _config.Llm.DefaultModel;
+    }
+
+    private string ResolveChatModel()
+    {
+        if (!string.IsNullOrWhiteSpace(_config.Chat.ChatModel))
+            return _config.Chat.ChatModel!;
+        if (!string.IsNullOrWhiteSpace(_config.Llm.GeneralModel))
+            return _config.Llm.GeneralModel!;
+        return _config.Llm.DefaultModel;
+    }
+
+    private string ResolveSummaryModel()
+    {
+        if (!string.IsNullOrWhiteSpace(_config.Llm.SummaryModel))
+            return _config.Llm.SummaryModel!;
+        return ResolveChatModel();
     }
 
     private List<string> ParsePlanResponse(string text)
@@ -311,7 +334,15 @@ public sealed class IntentResolver
         }
 
         // 최대 5개로 제한
-        return items.Count > 5 ? items.Take(5).ToList() : items.Count > 0 ? items : [text.Trim()];
+        if (items.Count > 5)
+            return items.Take(5).ToList();
+
+        if (items.Count > 0)
+            return items;
+
+        // LLM이 빈 문자열 또는 공백만 반환한 경우 빈 계획으로 처리
+        var fallback = text.Trim();
+        return string.IsNullOrWhiteSpace(fallback) ? [] : [fallback];
     }
 
     private IntentResult ParseIntentResponse(string text)

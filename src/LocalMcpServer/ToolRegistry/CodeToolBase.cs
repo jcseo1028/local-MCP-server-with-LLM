@@ -1,5 +1,7 @@
 using System.Text.Json;
+using LocalMcpServer.Configuration;
 using LocalMcpServer.LlmConnector;
+using Microsoft.Extensions.Options;
 
 namespace LocalMcpServer.ToolRegistry;
 
@@ -11,11 +13,13 @@ public abstract class CodeToolBase : IMcpTool
 {
     private readonly OllamaConnector _llm;
     private readonly PromptTemplateLoader _promptLoader;
+    private readonly ServerConfig _config;
 
-    protected CodeToolBase(OllamaConnector llm, PromptTemplateLoader promptLoader)
+    protected CodeToolBase(OllamaConnector llm, PromptTemplateLoader promptLoader, IOptions<ServerConfig> config)
     {
         _llm = llm;
         _promptLoader = promptLoader;
+        _config = config.Value;
     }
 
     public abstract string Name { get; }
@@ -30,6 +34,9 @@ public abstract class CodeToolBase : IMcpTool
         NumCtx = 16384
     };
 
+    /// <summary>코드 수정 도구는 기본적으로 코드 모델(DefaultModel)로 실행한다.</summary>
+    protected virtual string ResolveToolModel() => _config.Llm.DefaultModel;
+
     public async Task<ToolCallResult> ExecuteAsync(Dictionary<string, object?> arguments, CancellationToken ct = default)
     {
         var code = GetStringArg(arguments, "code")
@@ -38,6 +45,7 @@ public abstract class CodeToolBase : IMcpTool
         var language = GetStringArg(arguments, "language") ?? "";
 
         var filesContext = GetStringArg(arguments, "files_context") ?? "";
+        var relatedFilesContext = GetStringArg(arguments, "related_files_context") ?? "";
         var isMultiFile = !string.IsNullOrWhiteSpace(filesContext);
         var singleCodeSection = isMultiFile
             ? ""
@@ -50,6 +58,7 @@ public abstract class CodeToolBase : IMcpTool
                 ["code"] = code,
                 ["language"] = language,
                 ["files_context"] = filesContext,
+                ["related_files_context"] = relatedFilesContext,
                 ["single_code_section"] = singleCodeSection
             },
             ct);
@@ -57,6 +66,7 @@ public abstract class CodeToolBase : IMcpTool
         var llmResponse = await _llm.GenerateAsync(new LlmRequest
         {
             Prompt = prompt,
+            Model = ResolveToolModel(),
             Options = GetLlmOptions()
         }, ct);
 

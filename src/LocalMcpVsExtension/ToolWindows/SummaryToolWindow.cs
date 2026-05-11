@@ -11,7 +11,7 @@ namespace LocalMcpVsExtension.ToolWindows
 {
     public class SummaryToolWindow : BaseToolWindow<SummaryToolWindow>
     {
-        public override string GetTitle(int toolWindowId) => "Local MCP Agent by jcseo";
+        public override string GetTitle(int toolWindowId) => "Local MCP Agent";
 
         public override Type PaneType => typeof(Pane);
 

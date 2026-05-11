@@ -411,6 +411,45 @@ public static class McpEndpoints
             return Results.Json(BuildRunSnapshot(run), s_jsonOptions);
         });
 
+        // Run 확정 (임시 적용 확정)
+        app.MapPost("/api/chat/runs/{runId}/confirm", async (HttpContext ctx, string runId,
+            IConversationStore store, RunOrchestrator orchestrator) =>
+        {
+            var run = store.GetRun(runId);
+            if (run is null)
+                return Results.NotFound(new { error = "Run not found" });
+
+            using var reader = new StreamReader(ctx.Request.Body);
+            var body = await reader.ReadToEndAsync();
+            var request = JsonSerializer.Deserialize<JsonElement>(body);
+            var patchId = request.TryGetProperty("patchId", out var p) ? p.GetString() : null;
+
+            if (string.IsNullOrWhiteSpace(patchId) || !orchestrator.ProcessConfirm(run, patchId))
+                return Results.BadRequest(new { error = "Invalid patchId or patch state" });
+
+            return Results.Json(BuildRunSnapshot(run), s_jsonOptions);
+        });
+
+        // Run 되돌리기 (임시 적용 취소)
+        app.MapPost("/api/chat/runs/{runId}/revert", async (HttpContext ctx, string runId,
+            IConversationStore store, RunOrchestrator orchestrator) =>
+        {
+            var run = store.GetRun(runId);
+            if (run is null)
+                return Results.NotFound(new { error = "Run not found" });
+
+            using var reader = new StreamReader(ctx.Request.Body);
+            var body = await reader.ReadToEndAsync();
+            var request = JsonSerializer.Deserialize<JsonElement>(body);
+            var patchId = request.TryGetProperty("patchId", out var p) ? p.GetString() : null;
+            var reason = request.TryGetProperty("reason", out var r) ? r.GetString() : null;
+
+            if (string.IsNullOrWhiteSpace(patchId) || !orchestrator.ProcessRevert(run, patchId, reason))
+                return Results.BadRequest(new { error = "Invalid patchId or patch state" });
+
+            return Results.Json(BuildRunSnapshot(run), s_jsonOptions);
+        });
+
         // 클라이언트 빌드/테스트 결과 수신
         app.MapPost("/api/chat/runs/{runId}/client-result", async (HttpContext ctx, string runId,
             IConversationStore store, RunOrchestrator orchestrator) =>
@@ -428,8 +467,14 @@ public static class McpEndpoints
             if (request is null)
                 return Results.BadRequest(new { error = "Invalid request body" });
 
-            logger.LogInformation("Run {RunId} 클라이언트 결과 수신: build={Build}, tests={Tests}",
-                runId, request.Build.Attempted, request.Tests.Attempted);
+            logger.LogInformation(
+                "Run {RunId} 클라이언트 결과 수신: applied={Applied}, buildAttempted={BuildAttempted}, buildSucceeded={BuildSucceeded}, testAttempted={TestAttempted}, testSucceeded={TestSucceeded}",
+                runId,
+                request.Applied,
+                request.Build.Attempted,
+                request.Build.Succeeded,
+                request.Tests.Attempted,
+                request.Tests.Succeeded);
 
             await orchestrator.ProcessClientResultAsync(run, request);
 
@@ -444,6 +489,29 @@ public static class McpEndpoints
             runId = run.RunId,
             conversationId = run.ConversationId,
             state = run.State.ToString(),
+            executionMode = run.ExecutionMode.ToString(),
+            currentStepIndex = run.CurrentStepIndex,
+            planSteps = run.PlanSteps.Select(p => new
+            {
+                stepId = p.StepId,
+                toolName = p.ToolName,
+                status = p.Status.ToString(),
+                requiresApproval = p.RequiresApproval,
+                resultSummary = p.ResultSummary
+            }).ToArray(),
+            pendingPatch = run.PendingPatch is not null ? new
+            {
+                patchId = run.PendingPatch.PatchId,
+                state = run.PendingPatch.State.ToString(),
+                stepId = run.PendingPatch.StepId,
+                createdAt = run.PendingPatch.CreatedAt,
+                files = run.PendingPatch.Files.Select(f => new
+                {
+                    filePath = f.FilePath,
+                    original = f.Original,
+                    modified = f.Modified
+                }).ToArray()
+            } : null,
             createdAt = run.CreatedAt,
             stages = run.Stages.Select(s => new
             {

@@ -167,7 +167,8 @@ Config {
     strategy: string      // 색인 전략: "hybrid" (default) | "text" | "ast"
   }
   chat: {
-    intentModel: string | null   // 의도 분석용 모델 (null이면 defaultModel)
+    intentModel: string | null   // 의도/계획용 모델 (null이면 generalModel → defaultModel)
+    chatModel: string | null     // 일반 대화용 모델 (null이면 generalModel → defaultModel)
     conversationTimeoutMinutes: number // 대화 세션 타임아웃 (기본 30)
     maxConversationHistory: number     // 대화당 최대 메시지 수 (기본 20)
     intentAndPlanOnly: boolean         // true이면 모든 Run에서 의도 분석·계획 수립까지만 실행 (기본 false). 요청 단위 플래그와 OR 결합.
@@ -519,6 +520,8 @@ ChatRunStartRequest {
   activeFilePath: string | null // 단일 파일 경로 (하위 호환)
   solutionPath: string | null
   intentAndPlanOnly: boolean    // true이면 의도 분석·계획 수립까지만 실행
+  allowMultiToolPlan: boolean   // true이면 단일 프롬프트를 다중 도구 실행 계획으로 확장
+  maxPlanSteps: number | null   // 계획 최대 단계 수 (기본 3, 최대 5)
   files: [                      // 멀티 파일 컨텍스트 (null이면 단건 필드 사용) — v2.2
     {
       filePath: string
@@ -546,6 +549,30 @@ ChatRunSnapshot {
   conversationId: string
   runId: string
   state: string              // §6a 실행 상태 참조
+  executionMode: string      // "Single" | "Multi"
+  currentStepIndex: number   // 현재 실행 중인 계획 단계 인덱스 (0-based)
+  planSteps: [
+    {
+      stepId: string
+      toolName: string
+      status: string         // Pending | Running | WaitingConfirm | Completed | Failed | Reverted
+      requiresApproval: boolean
+      resultSummary: string | null
+    }
+  ]
+  pendingPatch: {
+    patchId: string
+    state: string            // Pending | Confirmed | Reverted | Expired
+    stepId: string | null
+    createdAt: string
+    files: [
+      {
+        filePath: string
+        original: string
+        modified: string
+      }
+    ]
+  } | null
   stages: [
     {
       stageId: string        // §6c 단계 ID
@@ -609,6 +636,35 @@ ChatRunApprovalRequest {
 ChatRunApprovalResponse {
   state: string              // "Running.Applying" 또는 "Rejected"
 }
+
+### 11c-2. Run 확정 (임시 적용 확정)
+
+```
+POST /api/chat/runs/{runId}/confirm
+
+ChatRunConfirmRequest {
+  patchId: string
+}
+
+ChatRunConfirmResponse {
+  state: string
+}
+```
+
+### 11c-3. Run 되돌리기 (임시 적용 취소)
+
+```
+POST /api/chat/runs/{runId}/revert
+
+ChatRunRevertRequest {
+  patchId: string
+  reason: string | null
+}
+
+ChatRunRevertResponse {
+  state: string
+}
+```
 ```
 
 ### 11d. 클라이언트 결과 보고 (적용/빌드/테스트)

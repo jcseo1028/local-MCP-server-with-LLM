@@ -10,7 +10,7 @@
 - **코드 모델**: qwen2.5-coder:7b (코드 변환·수정용)
 - **일반 모델**: gemma4 (의도 분석·계획·대화·요약용)
 - **접속 방식**: SSE (VS 2022 Agent mode) 또는 Direct REST API (오프라인 CLI)
-- **상태**: 7개 도구 구현 (summarize·add_comments·refactor·organize_imports·fix·search_project_code·suggest_fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v2.0 (채팅 UI·의도 분석·자동 도구 선택·승인 흐름·side-by-side diff) · **v2.1 구현 완료** (다단계 오케스트레이션·계획수립·문서검색·빌드/테스트·결과요약·단계별 UI) · Resource Cache 구현 완료 · **v2.2 구현 완료** (멀티파일 컨텍스트 전송·[FILE:] 프롬프트 안내·ApplyResults 전송) · **v2.3 구현 완료** (파일별 승인/거부 UI·파일 선택 UI·atomic rollback·[FILE:] 폴백 파싱) · **v2.4 구현 완료** (per-hunk accept/reject UI·unified diff 컬러 하이라이트·서버 측 hunks 사전 계산·대용량 파일 토큰 초과 대응) · **v2.5 구현 완료** (organize_imports 도구 추가·멀티파일 출력 엄격 모드·using/import 전용 검증 및 자동 보정)
+- **상태**: 7개 도구 구현 (summarize·add_comments·refactor·organize_imports·fix·search_project_code·suggest_fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v2.0 (채팅 UI·의도 분석·자동 도구 선택·승인 흐름·side-by-side diff) · **v2.1 구현 완료** (다단계 오케스트레이션·계획수립·문서검색·빌드/테스트·결과요약·단계별 UI) · Resource Cache 구현 완료 · **v2.2 구현 완료** (멀티파일 컨텍스트 전송·[FILE:] 프롬프트 안내·ApplyResults 전송) · **v2.3 구현 완료** (파일별 승인/거부 UI·파일 선택 UI·atomic rollback·[FILE:] 폴백 파싱) · **v2.4 구현 완료** (per-hunk accept/reject UI·unified diff 컬러 하이라이트·서버 측 hunks 사전 계산·대용량 파일 토큰 초과 대응) · **v2.5 구현 완료** (organize_imports 도구 추가·멀티파일 출력 엄격 모드·using/import 전용 검증 및 자동 보정) · **v2.6 구현 완료** (다중 도구 실행 계획 + PendingPatch 확정/되돌리기 API)
 - **비목표**: GitHub Copilot 대체
 
 ## 구성
@@ -252,6 +252,25 @@ src/LocalMcpVsExtension/
 - **organize_imports 도구 추가**: using/import 구문 정리 전용 도구 분리 (`organize_imports`)
 - **멀티파일 출력 엄격 모드**: `[FILE: 경로]...[/FILE]` 파싱 실패 시 단건 조용한 폴백 없이 1회 재시도 후 명시적 실패
 - **using/import 전용 안전장치**: 본문 변경 감지 시 검증 수행, 필요 시 import 블록만 원본 본문에 자동 보정 후 적용
+
+**v2.6 추가 기능:**
+- **다중 도구 실행 계획**: `allowMultiToolPlan=true` 요청 시 단일 프롬프트를 최대 `maxPlanSteps` 단계의 도구 실행 계획으로 확장
+- **Run 계획 상태 노출**: Run snapshot에 `executionMode`, `planSteps`, `currentStepIndex` 포함
+- **PendingPatch 추적**: 코드 변경 단계에서 임시 적용 대상 패치를 서버가 추적
+- **확정/되돌리기 API**: `POST /api/chat/runs/{runId}/confirm`, `POST /api/chat/runs/{runId}/revert`
+- **VSIX 버튼 연동**: PendingPatch가 있으면 UI 버튼이 `확정/되돌리기`로 동작하고, 없으면 기존 `승인/거부`를 사용
+- **VSIX 실행 단계 표시**: Run 카드에 도구 실행 단계(`planSteps`)와 현재 인덱스를 표시
+- **리팩토링 키워드 보강**: 계획 생성 시 `리팩토링` 표현도 `refactor_current_code` 단계로 인식
+- **빈 계획 항목 정리**: 계획 수립 LLM의 빈 응답은 공백 항목으로 노출하지 않음
+- **재시도 예산 가드**: 멀티파일 포맷 재시도 전 남은 실행 시간(최소 90초)을 확인해 예산 부족 시 재시도 생략
+- **취소 로그 분리**: 타임아웃 취소와 외부 취소(서버 중단/요청 취소) 로그 및 에러 메시지를 분리
+- **모델 역할 분리(v2.6.2)**: 의도/계획은 `Chat.IntentModel`(qwen) 우선, 일반 대화는 `Chat.ChatModel`(gemma4), 결과 요약은 `Llm.SummaryModel`(gemma4) 우선 사용
+- **도구 모델 강제(v2.6.3)**: 코드 수정 도구 실행 시 `LlmRequest.Model`을 명시해 `Llm.DefaultModel`(코드 모델)로 고정
+- **예산 분리(v2.6.3)**: Run 전체 예산(10분)과 step 실행 예산(기본 4분) 분리 적용
+- **대기 시간 제외(v2.6.3)**: 승인 대기 및 클라이언트 빌드/테스트 대기 시간은 Run 예산 계산에서 제외
+- **파일별 단건 조합(v2.6.4)**: 멀티파일 편집 요청은 파일별 단건 호출로 처리하고 서버가 결과를 `FileChange` 목록으로 조합
+- **보조 컨텍스트 하이브리드(v2.6.4)**: 현재 파일 외 선택 파일은 요약 정보만 참고 컨텍스트로 전달하여 모델의 멀티파일 출력 의존도를 줄임
+- **실패 즉시 중단(v2.6.5)**: 클라이언트 적용/빌드/테스트 실패가 보고되면 다음 step으로 진행하지 않고 Run을 즉시 `Failed`로 종료
 
 **v2.1 추가 기능:**
 - **9단계 오케스트레이션**: 의도분석 → 계획수립 → 컨텍스트수집 → 문서검색 → 수정안생성 → 승인 → 적용 → 빌드/테스트 → 결과요약
