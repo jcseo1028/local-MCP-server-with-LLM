@@ -152,6 +152,8 @@ Config {
     defaultModel: string  // 코드 태스크 모델명 (권장: Qwen 계열)
     generalModel: string | null  // 일반 태스크 모델명 (선택, 권장: Gemma 계열, null이면 defaultModel 사용)
     summaryModel: string | null  // 보조 요약 모델명 (선택, null이면 generalModel → defaultModel 사용)
+    largeFileModel: string | null // 대용량 코드(800줄 이상) 전용 모델명 (권장: qwen2.5-coder:32b)
+    requestTimeoutMinutes: number // LLM HTTP 요청 타임아웃(분), 기본 20
   }
   tools: {
     directory: string     // 도구 정의 디렉터리 경로

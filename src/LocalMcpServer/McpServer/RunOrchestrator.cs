@@ -19,9 +19,10 @@ public sealed class RunOrchestrator
     private readonly IResourceCache _cache;
     private readonly ILogger<RunOrchestrator> _logger;
     private readonly RunLogger _runLogger;
+    private readonly ServerConfig _config;
     private readonly ChatSection _chatConfig;
-    private static readonly TimeSpan RunTimeout = TimeSpan.FromMinutes(20);
-    private static readonly TimeSpan StepExecutionBudget = TimeSpan.FromMinutes(8);
+    private static readonly TimeSpan RunTimeout = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan StepExecutionBudget = TimeSpan.FromMinutes(12);
     private static readonly TimeSpan MultiFileRetryMinBudget = TimeSpan.FromSeconds(180);
 
     public RunOrchestrator(
@@ -39,6 +40,7 @@ public sealed class RunOrchestrator
         _docSearcher = docSearcher;
         _registry = registry;
         _cache = cache;
+        _config = config.Value;
         _chatConfig = config.Value.Chat;
         _runLogger = runLogger;
         _logger = logger;
@@ -355,7 +357,7 @@ public sealed class RunOrchestrator
             if (GetRemainingRunBudget(run) <= TimeSpan.Zero)
             {
                 _logger.LogWarning("Run {RunId} 타임아웃 취소됨 (limit={LimitMinutes}분)", run.RunId, RunTimeout.TotalMinutes);
-                run.Error = "작업이 취소되었습니다. 실행 제한 시간(20분)을 초과했습니다.";
+                run.Error = "작업이 취소되었습니다. 실행 제한 시간(30분)을 초과했습니다.";
             }
             else
             {
@@ -384,7 +386,7 @@ public sealed class RunOrchestrator
     {
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(15));
 
             // 7. 적용 단계 — VSIX 클라이언트 측에서 수행, 서버는 상태만 기록
             var s7 = run.GetStage(StageIds.Applying);
@@ -621,6 +623,11 @@ public sealed class RunOrchestrator
                     ["files_context"] = filesContext
                 };
 
+                if (IntentResolver.IsEditTool(toolName))
+                {
+                    arguments["model"] = GetOptimalModelForFile(CountLines(run.Code ?? string.Empty));
+                }
+
                 var toolResult = await tool.ExecuteAsync(arguments, ct);
                 var resultText = toolResult.Content.FirstOrDefault()?.Text ?? "(결과 없음)";
                 _runLogger.LogToolExecution(run.RunId, toolName, resultText);
@@ -716,6 +723,17 @@ public sealed class RunOrchestrator
                     else
                     {
                         var singleModified = modifiedCode ?? resultText;
+                        if (run.Code is not null &&
+                            !ValidateMethodPreservationRate(run.Code, singleModified, out var preservationError))
+                        {
+                            run.Proposal = new RunProposal
+                            {
+                                Summary = $"메서드 보존율 검증 실패: {preservationError}",
+                                RequiresApproval = false
+                            };
+                            return;
+                        }
+
                         if (IsOrganizeImportsTool(toolName) &&
                             run.Code is not null &&
                             !EnforceOrganizeImportsSingle(run.Code, singleModified, out singleModified, out var singleValidationError))
@@ -777,12 +795,62 @@ public sealed class RunOrchestrator
 
         foreach (var file in run.Files ?? [])
         {
-            var sourceCode = file.SelectedCode ?? file.Code;
+            var fullCode = file.SelectedCode ?? file.Code;
+            var sourceCode = fullCode;
             var language = file.Language ?? run.Language ?? "";
+            var lineCount = CountLines(fullCode);
+            var selectedModel = GetOptimalModelForFile(lineCount);
+
+            // 6.3-1/3/4: 초대형 파일(2000줄 초과)은 메서드 단위 우선, 실패 시 라인 청크로 분할 처리.
+            // 모든 청크가 성공할 때만 반영하는 트랜잭션 방식으로 원자성을 보장한다.
+            if (!file.SelectionOnly && lineCount > 2000)
+            {
+                var chunked = await ProcessLargeFileWithTransactionAsync(run, toolName, tool, file, fullCode, language, selectedModel, ct);
+                if (!chunked.success)
+                {
+                    run.Proposal = new RunProposal
+                    {
+                        Summary = $"대용량 파일 분할 처리 실패: {file.FilePath} — {chunked.error}",
+                        RequiresApproval = false
+                    };
+                    return;
+                }
+
+                var chunkedModified = chunked.modifiedCode;
+                if (!ValidateMethodPreservationRate(fullCode, chunkedModified, out var chunkPreservationError))
+                {
+                    run.Proposal = new RunProposal
+                    {
+                        Summary = $"메서드 보존율 검증 실패: {file.FilePath} — {chunkPreservationError}",
+                        RequiresApproval = false
+                    };
+                    return;
+                }
+
+                if (TryAutoRecoverSyntax(language, chunkedModified, out var recoveredChunkCode))
+                    chunkedModified = recoveredChunkCode;
+
+                if (!string.Equals(fullCode, chunkedModified, StringComparison.Ordinal))
+                {
+                    fileChanges.Add(BuildFileChange(file, chunkedModified));
+                    changedFilePaths.Add(file.FilePath);
+                }
+
+                continue;
+            }
+            
+            // v2.6.6: 파일 크기에 따라 전달 코드 길이를 동적으로 조절한다.
+            var maxCodeForPerFile = GetOptimalMaxPerFileChars(lineCount, file.SelectionOnly);
+            if (sourceCode.Length > maxCodeForPerFile)
+            {
+                sourceCode = sourceCode[..maxCodeForPerFile];
+            }
+            
             var arguments = new Dictionary<string, object?>
             {
                 ["code"] = sourceCode,
                 ["language"] = language,
+                ["model"] = selectedModel,
                 ["files_context"] = "",
                 ["related_files_context"] = BuildRelatedFilesContext(run, file.FilePath)
             };
@@ -792,6 +860,20 @@ public sealed class RunOrchestrator
             _runLogger.LogToolExecution(run.RunId, $"{toolName}:{Path.GetFileName(file.FilePath)}", resultText);
 
             var modifiedCode = ExtractCodeFromResult(resultText) ?? resultText;
+            if (TryAutoRecoverSyntax(language, modifiedCode, out var recoveredCode))
+                modifiedCode = recoveredCode;
+
+            if (!file.SelectionOnly &&
+                !ValidateMethodPreservationRate(fullCode, modifiedCode, out var preservationError))
+            {
+                run.Proposal = new RunProposal
+                {
+                    Summary = $"메서드 보존율 검증 실패: {file.FilePath} — {preservationError}",
+                    RequiresApproval = false
+                };
+                return;
+            }
+
             if (IsOrganizeImportsTool(toolName) &&
                 !EnforceOrganizeImportsSingle(sourceCode, modifiedCode, out modifiedCode, out var validationError))
             {
@@ -873,7 +955,7 @@ public sealed class RunOrchestrator
 
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(6));
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
             var summary = await _intent.GenerateSummaryAsync(
                 run.Message,
                 run.Intent ?? new IntentResult(),
@@ -904,10 +986,284 @@ public sealed class RunOrchestrator
     /// Files가 없거나 비어있으면 빈 문자열을 반환한다 (단건 모드 시 {{files_context}} 자리가 빈 문자열로 치환됨).
     /// </summary>
     // B-5: 파일별/전체 최대 문자 수 제한 (토큰 초과 대응)
-    private const int MaxPerFileChars  = 8_000;   // ≈2000 tokens/file
+    private const int MaxPerFileChars  = 8_000;   // 표준 파일
+    private const int MediumPerFileChars = 16_000;
+    private const int LargePerFileChars = 24_000; // 800줄 이상 대용량 파일
+    private const int ChunkedPerFileChars = 12_000; // 2000줄 초과 청크 기준
+    private const int MethodModeChunkLineLimit = 900;
+    private const int LineChunkSize = 1200;
     private const int MaxTotalChars    = 32_000;  // ≈8000 tokens total
-    private const int MaxRelatedFiles  = 3;
-    private const int MaxRelatedChars  = 4_000;
+    private const int MaxRelatedFiles  = 1;       // v2.6.5: per-file 모드에서는 1개만
+    private const int MaxRelatedChars  = 500;     // v2.6.5: 관련파일 요약 극소화
+
+    private static int CountLines(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return 0;
+
+        return text.Count(c => c == '\n') + 1;
+    }
+
+    private static int GetOptimalMaxPerFileChars(int lineCount, bool selectionOnly)
+    {
+        if (selectionOnly)
+            return MaxPerFileChars;
+
+        if (lineCount > 2000)
+            return ChunkedPerFileChars;
+        if (lineCount >= 800)
+            return LargePerFileChars;
+        if (lineCount > 300)
+            return MediumPerFileChars;
+
+        return MaxPerFileChars;
+    }
+
+    private string GetOptimalModelForFile(int lineCount)
+    {
+        if (lineCount < 800)
+            return _config.Llm.DefaultModel;
+
+        var largeFileModel = _config.Llm.LargeFileModel;
+        if (string.IsNullOrWhiteSpace(largeFileModel))
+        {
+            throw new InvalidOperationException(
+                "대용량 파일(800줄 이상) 처리에는 Llm.LargeFileModel 설정이 필요합니다.");
+        }
+
+        return largeFileModel;
+    }
+
+    private static bool ValidateMethodPreservationRate(string beforeCode, string afterCode, out string error, double minRate = 0.8)
+    {
+        var beforeMethods = CountPublicMethods(beforeCode);
+        var afterMethods = CountPublicMethods(afterCode);
+
+        if (beforeMethods == 0)
+        {
+            error = string.Empty;
+            return true;
+        }
+
+        var ratio = (double)afterMethods / beforeMethods;
+        if (ratio < minRate)
+        {
+            error = $"공개 메서드 수 감소: {beforeMethods} -> {afterMethods} (비율 {ratio:P0}, 기준 {minRate:P0})";
+            return false;
+        }
+
+        error = string.Empty;
+        return true;
+    }
+
+    private static int CountPublicMethods(string code)
+    {
+        if (string.IsNullOrWhiteSpace(code))
+            return 0;
+
+        var normalized = code.Replace("\r\n", "\n");
+        var lines = normalized.Split('\n');
+        var count = 0;
+
+        foreach (var raw in lines)
+        {
+            var line = raw.TrimStart();
+            if (line.StartsWith("//", StringComparison.Ordinal) ||
+                line.StartsWith("*", StringComparison.Ordinal) ||
+                line.StartsWith("/*", StringComparison.Ordinal))
+                continue;
+
+            if (!line.Contains("public ", StringComparison.Ordinal))
+                continue;
+
+            if (!line.Contains('(') || !line.Contains(')'))
+                continue;
+
+            if (line.Contains(" class ", StringComparison.Ordinal) ||
+                line.Contains(" interface ", StringComparison.Ordinal) ||
+                line.Contains(" struct ", StringComparison.Ordinal) ||
+                line.Contains(" enum ", StringComparison.Ordinal))
+                continue;
+
+            count++;
+        }
+
+        return count;
+    }
+
+    private async Task<(bool success, string modifiedCode, string error)> ProcessLargeFileWithTransactionAsync(
+        RunData run,
+        string toolName,
+        IMcpTool tool,
+        FileContext file,
+        string fullCode,
+        string language,
+        string selectedModel,
+        CancellationToken ct)
+    {
+        var chunks = SplitIntoMethodModeChunks(fullCode, MethodModeChunkLineLimit);
+        if (chunks.Count <= 1)
+            chunks = SplitIntoLineChunks(fullCode, LineChunkSize);
+
+        var chunkResults = new List<string>(chunks.Count);
+
+        for (int i = 0; i < chunks.Count; i++)
+        {
+            var chunk = chunks[i];
+            var arguments = new Dictionary<string, object?>
+            {
+                ["code"] = chunk,
+                ["language"] = language,
+                ["model"] = selectedModel,
+                ["files_context"] = "",
+                ["related_files_context"] = BuildRelatedFilesContext(run, file.FilePath)
+            };
+
+            var toolResult = await tool.ExecuteAsync(arguments, ct);
+            var resultText = toolResult.Content.FirstOrDefault()?.Text ?? "(결과 없음)";
+            var modifiedChunk = ExtractCodeFromResult(resultText) ?? resultText;
+
+            if (TryAutoRecoverSyntax(language, modifiedChunk, out var recoveredChunk))
+                modifiedChunk = recoveredChunk;
+
+            if (IsOrganizeImportsTool(toolName) &&
+                !EnforceOrganizeImportsSingle(chunk, modifiedChunk, out modifiedChunk, out var organizeErr))
+            {
+                return (false, string.Empty, $"청크 {i + 1}/{chunks.Count} using/import 검증 실패: {organizeErr}");
+            }
+
+            // 트랜잭션 성격: 모든 청크가 성공하기 전에는 원본에 반영하지 않는다.
+            chunkResults.Add(modifiedChunk);
+        }
+
+        return (true, string.Join("\n", chunkResults), string.Empty);
+    }
+
+    private static List<string> SplitIntoLineChunks(string code, int chunkLineSize)
+    {
+        var lines = code.Split('\n');
+        var chunks = new List<string>();
+
+        for (int i = 0; i < lines.Length; i += chunkLineSize)
+        {
+            var take = Math.Min(chunkLineSize, lines.Length - i);
+            chunks.Add(string.Join("\n", lines, i, take));
+        }
+
+        return chunks;
+    }
+
+    private static List<string> SplitIntoMethodModeChunks(string code, int maxChunkLines)
+    {
+        var lines = code.Split('\n');
+        var boundaries = new List<int>();
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var t = lines[i].TrimStart();
+            if (LooksLikeMethodDeclaration(t))
+                boundaries.Add(i);
+        }
+
+        if (boundaries.Count < 2)
+            return SplitIntoLineChunks(code, maxChunkLines);
+
+        var chunks = new List<string>();
+        var start = 0;
+        foreach (var methodStart in boundaries)
+        {
+            if (methodStart <= start)
+                continue;
+
+            var len = methodStart - start;
+            if (len > maxChunkLines)
+            {
+                chunks.AddRange(SplitIntoLineChunks(string.Join("\n", lines, start, len), maxChunkLines));
+            }
+            else
+            {
+                chunks.Add(string.Join("\n", lines, start, len));
+            }
+
+            start = methodStart;
+        }
+
+        if (start < lines.Length)
+            chunks.Add(string.Join("\n", lines, start, lines.Length - start));
+
+        return chunks.Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
+    }
+
+    private static bool LooksLikeMethodDeclaration(string line)
+    {
+        if (!(line.StartsWith("public ", StringComparison.Ordinal) ||
+              line.StartsWith("private ", StringComparison.Ordinal) ||
+              line.StartsWith("protected ", StringComparison.Ordinal) ||
+              line.StartsWith("internal ", StringComparison.Ordinal)))
+            return false;
+
+        if (!line.Contains('(') || !line.Contains(')'))
+            return false;
+
+        if (line.Contains(" class ", StringComparison.Ordinal) ||
+            line.Contains(" interface ", StringComparison.Ordinal) ||
+            line.Contains(" struct ", StringComparison.Ordinal) ||
+            line.Contains(" enum ", StringComparison.Ordinal))
+            return false;
+
+        return true;
+    }
+
+    private static bool TryAutoRecoverSyntax(string language, string code, out string recovered)
+    {
+        recovered = code;
+        if (!string.Equals(language, "csharp", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(language, "cs", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (HasBalancedDelimiters(code))
+            return false;
+
+        var openCurly = code.Count(c => c == '{');
+        var closeCurly = code.Count(c => c == '}');
+        var openParen = code.Count(c => c == '(');
+        var closeParen = code.Count(c => c == ')');
+        var openBracket = code.Count(c => c == '[');
+        var closeBracket = code.Count(c => c == ']');
+
+        if (closeCurly > openCurly || closeParen > openParen || closeBracket > openBracket)
+            return false;
+
+        var sb = new System.Text.StringBuilder(code);
+        for (int i = 0; i < openParen - closeParen; i++) sb.Append(')');
+        for (int i = 0; i < openBracket - closeBracket; i++) sb.Append(']');
+        for (int i = 0; i < openCurly - closeCurly; i++) sb.AppendLine().Append('}');
+
+        recovered = sb.ToString();
+        return HasBalancedDelimiters(recovered);
+    }
+
+    private static bool HasBalancedDelimiters(string code)
+    {
+        int curly = 0, paren = 0, bracket = 0;
+        foreach (var ch in code)
+        {
+            switch (ch)
+            {
+                case '{': curly++; break;
+                case '}': curly--; break;
+                case '(': paren++; break;
+                case ')': paren--; break;
+                case '[': bracket++; break;
+                case ']': bracket--; break;
+            }
+
+            if (curly < 0 || paren < 0 || bracket < 0)
+                return false;
+        }
+
+        return curly == 0 && paren == 0 && bracket == 0;
+    }
 
     private static string BuildFilesContext(RunData run)
     {
@@ -1012,23 +1368,29 @@ public sealed class RunOrchestrator
         var lines = normalized.Split('\n');
         var picked = new List<string>();
 
+        // v2.6.5: 관련파일 요약은 namespace/class 선언만 추출 (매우 제한적)
         foreach (var line in lines)
         {
             var trimmed = line.Trim();
             if (trimmed.Length == 0)
                 continue;
 
-            if (IsRelevantContextLine(trimmed))
+            if (trimmed.StartsWith("namespace ", StringComparison.Ordinal) ||
+                (trimmed.Contains(" class ") && !trimmed.StartsWith("//")) ||
+                (trimmed.Contains(" interface ") && !trimmed.StartsWith("//")) ||
+                (trimmed.Contains(" struct ") && !trimmed.StartsWith("//")))
+            {
                 picked.Add(trimmed);
+            }
 
-            if (picked.Count >= 12)
+            if (picked.Count >= 3)  // 최대 3줄만
                 break;
         }
 
         if (picked.Count == 0)
         {
-            var preview = normalized.Length > 600 ? normalized[..600] + "\n...(생략)" : normalized;
-            return preview;
+            // 관련 선언을 찾을 수 없으면 빈 줄로
+            return "(코드 참고만)";
         }
 
         return string.Join("\n", picked);

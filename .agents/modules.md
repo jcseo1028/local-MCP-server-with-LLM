@@ -24,12 +24,28 @@
 - **RunOrchestrator 예산 분리 (v2.6.3)**: 전체 Run 예산(10분)과 step 실행 예산(기본 4분)을 분리하고, 승인 대기/클라이언트 빌드·테스트 대기 시간은 예산 계산에서 제외한다. 멀티파일 재시도 여부도 `실제 남은 실행 예산` 기준으로 판단한다.
 - **RunOrchestrator 파일별 편집 조합 (v2.6.4)**: `organize_imports`, `refactor_current_code` 같은 편집 도구는 멀티파일 응답 포맷을 모델에게 강제하지 않고, 선택된 파일마다 단건 모드로 실행한 뒤 서버가 `FileChange` 목록으로 조합한다. 다른 선택 파일은 요약된 보조 컨텍스트로만 전달한다.
 - **RunOrchestrator fail-fast (v2.6.5)**: 클라이언트 `client-result`에서 적용 실패/빌드 실패/테스트 실패가 보고되면 후속 step 실행을 중단하고 Run을 즉시 `Failed`로 종료한다. 현재 step 상태도 `Failed`로 반영한다.
+- **RunOrchestrator 대용량 파일 강제 모델 (v2.6.6)**: 코드 수정 도구 실행 시 파일 줄 수를 기준으로 모델/입력 크기를 동적으로 결정한다. 800줄 이상은 `Llm.LargeFileModel`(예: `qwen2.5-coder:32b`)을 강제 사용하며, 설정이 없으면 폴백 없이 명시적 실패를 반환한다. 입력 길이는 300줄 초과(16KB), 800줄 이상(24KB), 2000줄 초과(12KB 청크 기준)로 조정한다.
+- **RunOrchestrator 타임아웃 조정 (v2.6.6)**: 32b 추론 지연을 고려해 Run 예산을 30분, step 실행 예산을 12분으로 상향했다. 후처리 단계 제한은 15분, 최종 요약 제한은 10분으로 조정했다.
+- **RunOrchestrator 대용량 분할 처리 (v2.6.7)**: 2000줄 초과 파일은 메서드 단위 분할 모드(실패 시 라인 청크 분할)로 처리한다. 청크별 도구 실행이 모두 성공할 때만 최종 코드를 반영하여 원자성을 보장한다.
+- **RunOrchestrator 자동 구문 복구 (v2.6.7)**: C# 출력에서 괄호/중괄호 불균형을 감지하면 닫힘 토큰 보정으로 1차 자동 복구를 시도한다. 복구 실패 시 해당 수정안을 거부한다.
 - **검증 모드**: `ChatRunStartRequest.intentAndPlanOnly=true` 이면 RunOrchestrator가 의도 분석과 계획 수립까지만 수행하고, 후속 단계는 Skipped 처리한 뒤 즉시 완료한다. 느린 LLM 환경에서 의도/계획의 타당성을 우선 검증하기 위한 모드다.
 - **ConversationStore**: 대화 상태를 메모리 내 관리. 대화 이력을 LLM 컨텍스트에 포함. v2.1에서 **run 단위 실행 상태**도 함께 관리. 향후 SQLite 등 경량 DB 마이그레이션 가능하도록 인터페이스 분리.
 - **제약**: 모든 LLM 호출은 로컬 엔드포인트(Ollama 등)만 사용. 원격 LLM API 금지. 문서검색은 로컬 파일만 대상.
 - **구현**: `McpServer/McpEndpoints.cs` — SSE + REST + Chat + Run 엔드포인트, `McpServer/IntentResolver.cs`, `McpServer/ConversationStore.cs`, `McpServer/RunOrchestrator.cs` (v2.1), `McpServer/DiffEngine.cs` (A-2 서버 측 diff 사전 계산), `McpServer/DocumentSearcher.cs` (v2.1), `McpServer/RunModels.cs` (v2.1 상태 모델 + `DiffHunkInfo`), `McpServer/RunLogger.cs` (v2.1 파이프라인 로깅)
 - **CodeToolBase 모델 선택 (v2.6.3)**: 코드 수정 도구는 `LlmRequest.Model`을 명시하여 `Llm.DefaultModel`(코드 모델)로 호출한다. 모델 미지정 시 `summaryModel`로 떨어지는 부작용을 방지한다.
+- **CodeToolBase 모델 오버라이드 (v2.6.6)**: 도구 인자에 `model`이 전달되면 해당 값을 우선 사용하고, 없으면 `Llm.DefaultModel`을 사용한다.
 - **CodeToolBase 보조 컨텍스트 (v2.6.4)**: 단건 편집 모드에서 `related_files_context` 변수를 프롬프트에 주입해, 현재 파일 외 참조 정보만 제한적으로 제공한다.
+- **RunOrchestrator 대용량 파일 적응형 처리 (v2.6.6)**:
+  - MaxPerFileChars 동적 결정: 300줄 미만(8KB), 300-800줄(10-16KB), 800줄 이상(16-20KB)
+  - 모델 선택: 800줄 이상 파일은 `qwen2.5-coder:32b` 우선 사용
+  - SelectionOnly 모드: 4KB 유지
+  - 메서드 추가: `GetOptimalMaxPerFileChars(lineCount)`, `GetOptimalModelForFile(lineCount)`
+  
+- **완성도 검증 (v2.6.6)**:
+  - 메서드 보존율: 변경 후 메서드 수 ≥ 원본 × 80% (공개 메서드 기준)
+  - 구문 검증: C# 컴파일 오류 0개
+  - 메서드 추가: `ValidateMethodPreservationRate(before, after, minRate)`, `CountPublicMethods(code)`
+  - 실패 시 자동 거부 및 사용자 알림
 
 ## 2. Tool Registry
 
@@ -52,6 +68,7 @@
 - **외부 의존**: 로컬 LLM 엔드포인트 (권장: Ollama)
 - **제약**: 오프라인 환경 전용. 원격 LLM 엔드포인트를 사용하지 않는다.
 - **다중 모델**: 코드 모델(`DefaultModel`, 코드 변환용)과 일반 모델(`GeneralModel`, 의도 분석·계획·대화·요약용)을 Config 기반으로 선택한다. 호출자가 `LlmRequest.Model`에 적절한 모델을 명시하고, null이면 `SummaryModel → DefaultModel` 순으로 폴백한다. 모델 선택 시 `string.IsNullOrEmpty` 검증으로 빈 문자열도 fallback 처리한다.
+- **요청 타임아웃 (v2.6.6)**: `Program.cs`의 `AddHttpClient<OllamaConnector>()`에서 `Llm.RequestTimeoutMinutes`를 적용한다. 기본값은 20분이며 32b 모델 장시간 추론을 허용한다.
 - **구현**: `LlmConnector/` — OllamaConnector (`/api/chat` 엔드포인트), LlmModels
 
 ## 4. Resource Cache
@@ -95,7 +112,7 @@
 - **코드 적용 모드**: 선택 영역 모드(SelectionOnly)일 때 원본 텍스트를 문서에서 찾아 해당 부분만 교체. 원본 매칭 실패 시 적용 실패로 처리하고 build_test는 Skipped (§8g). 전체 파일 모드일 때 전체 교체. **B-1**: 멀티파일 Expander 헤더에 파일별 승인/거부 체크박스 표시—체크 해제된 파일은 적용 제외. **B-2**: 파일 선택 UI—파일 선택 버튼 + 체크리스트 패널 토글로 열린 파일 직접 선택 가능. **B-3**: 멀티파일 atomic rollback—적용 전 원본 메모리 백업, 어느 파일이든 실패 시 이미 적용된 전체 반자.
 - **대화 세션 백업**: 새 대화 시작 또는 이전 대화 복원 시 현재 대화를 자동 백업. 최대 20개 세션 유지. 첫 번째 사용자 메시지를 제목으로 표시.
 - **코드 컨텍스트 확인**: 선택 영역 없이 코드 수정 요청 시 "현재 파일 전체를 포함할까요?" 확인 후 진행.
-- **구현**: `src/LocalMcpVsExtension/` — VSIX 프로젝트 (Community.VisualStudio.Toolkit.17, Markdig). `Services/McpRestClient.cs` (Run API 클라이언트 + `DiffHunkDto` + `confirm/revert` 호출), `Services/ChatMessageViewModel.cs` (ChatRunViewModel·ChatRunStageViewModel 분리, `CodeChangeInfo.HunkSelections`, `FileChangeInfo.HunkSelections`, `HunkSelection` 포함), `Services/BuildTestRunner.cs` (v2.1 오프라인 빌드/테스트), `Services/LineDiffEngine.cs` (Myers LCS diff, `DiffHunk`), `ToolWindows/SummaryToolWindowControl.cs` (Run 폴링 + 타임라인 UI + v2.6 실행 단계 섹션 + A-1/A-2/A-3/B-1/B-2/B-3 + 파일 선택·per-hunk·unified diff·rollback)
+- **구현**: `src/LocalMcpVsExtension/` — VSIX 프로젝트 (Community.VisualStudio.Toolkit.17, Markdig). `Services/McpRestClient.cs` (Run API 클라이언트 + `DiffHunkDto` + `confirm/revert` 호출), `Services/ChatMessageViewModel.cs` (ChatRunViewModel·ChatRunStageViewModel 분리, `CodeChangeInfo.HunkSelections`, `FileChangeInfo.HunkSelections`, `HunkSelection` 포함), `Services/BuildTestRunner.cs` (v2.1 오프라인 빌드/테스트, dotnet 빌드의 MSB4803 감지 시 Visual Studio MSBuild 폴백), `Services/LineDiffEngine.cs` (Myers LCS diff, `DiffHunk`), `ToolWindows/SummaryToolWindowControl.cs` (Run 폴링 + 타임라인 UI + v2.6 실행 단계 섹션 + A-1/A-2/A-3/B-1/B-2/B-3 + 파일 선택·per-hunk·unified diff·rollback)
 - **빌드 주의**: SDK-style csproj에서 `<Import Project="Sdk.props" />` / `<Import Project="Sdk.targets" />` 를 명시적으로 분리하고 VsSDK.targets를 Sdk.targets 뒤에 import해야 pkgdef 생성과 VSIX 패키징이 동작한다. VS 2022 MSBuild로 빌드한다.
 
 ---

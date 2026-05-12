@@ -1,5 +1,7 @@
 using System;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -20,6 +22,23 @@ namespace LocalMcpVsExtension.Services
             if (string.IsNullOrEmpty(solutionPath))
                 return new BuildRunResult { Attempted = false, Summary = "솔루션 경로 없음" };
 
+            // VS 확장 환경에서 다루는 레거시 솔루션은 MSBuild(.NET Framework) 호환성이 더 높다.
+            // 가능하면 VS MSBuild를 우선 사용하고, 없을 때만 dotnet으로 폴백한다.
+            if (TryGetVisualStudioMsBuildPath(out var msbuildPath))
+            {
+                var msbuildArgs = $"\"{solutionPath}\" /t:Build /p:RestorePackages=false /p:Configuration=Debug /v:q /nologo";
+                var msbuildResult = await RunProcessAsync(msbuildPath, msbuildArgs, "빌드(MSBuild)");
+                if (msbuildResult.Succeeded == true)
+                    return msbuildResult;
+
+                // MSBuild가 실패하면 dotnet으로 1회 폴백해 진단 정보를 추가 확보한다.
+                var dotnetArgs = $"build \"{solutionPath}\" --no-restore --verbosity quiet";
+                var dotnetResult = await RunDotnetAsync(dotnetArgs, "빌드(dotnet 폴백)");
+                dotnetResult.Summary =
+                    $"MSBuild 실패 후 dotnet 폴백 결과\n- msbuild: {msbuildResult.Summary}\n- dotnet: {dotnetResult.Summary}";
+                return dotnetResult;
+            }
+
             var args = $"build \"{solutionPath}\" --no-restore --verbosity quiet";
             return await RunDotnetAsync(args, "빌드");
         }
@@ -39,6 +58,9 @@ namespace LocalMcpVsExtension.Services
         }
 
         private static async Task<BuildRunResult> RunDotnetAsync(string arguments, string label)
+            => await RunProcessAsync("dotnet", arguments, label);
+
+        private static async Task<BuildRunResult> RunProcessAsync(string fileName, string arguments, string label)
         {
             var result = new BuildRunResult { Attempted = true };
 
@@ -46,12 +68,14 @@ namespace LocalMcpVsExtension.Services
             {
                 var psi = new ProcessStartInfo
                 {
-                    FileName = "dotnet",
+                    FileName = fileName,
                     Arguments = arguments,
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
-                    CreateNoWindow = true
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = Encoding.UTF8,
+                    StandardErrorEncoding = Encoding.UTF8
                 };
 
                 var stdout = new StringBuilder();
@@ -76,9 +100,19 @@ namespace LocalMcpVsExtension.Services
                     }
 
                     result.Succeeded = process.ExitCode == 0;
+                    var outText = stdout.ToString().Trim();
+                    var errText = stderr.ToString().Trim();
+                    var merged = new StringBuilder();
+                    if (!string.IsNullOrEmpty(errText))
+                        merged.AppendLine(errText);
+                    if (!string.IsNullOrEmpty(outText))
+                        merged.AppendLine(outText);
 
-                    var output = stderr.Length > 0 ? stderr.ToString() : stdout.ToString();
-                    result.Summary = output.Length > 500 ? output.Substring(0, 500) + "..." : output;
+                    var output = merged.ToString().Trim();
+                    if (string.IsNullOrEmpty(output))
+                        output = $"{label} 종료 (exitCode={process.ExitCode})";
+
+                    result.Summary = BuildSummary(label, output, process.ExitCode, result.Succeeded == true);
                 }
             }
             catch (Exception ex)
@@ -88,6 +122,60 @@ namespace LocalMcpVsExtension.Services
             }
 
             return result;
+        }
+
+        private static string BuildSummary(string label, string output, int exitCode, bool succeeded)
+        {
+            var normalized = output.Replace("\r\n", "\n").Replace('\r', '\n');
+            var lines = normalized.Split('\n');
+
+            var errorLines = lines
+                .Where(l => l.IndexOf(": error ", StringComparison.OrdinalIgnoreCase) >= 0)
+                .Take(8)
+                .ToArray();
+            if (errorLines.Length > 0)
+            {
+                var joined = string.Join("\n", errorLines);
+                return $"{label} 실패 (exitCode={exitCode})\n{joined}";
+            }
+
+            var warnLines = lines
+                .Where(l => l.IndexOf(": warning ", StringComparison.OrdinalIgnoreCase) >= 0)
+                .Take(8)
+                .ToArray();
+            if (!succeeded && warnLines.Length > 0)
+            {
+                var joined = string.Join("\n", warnLines);
+                return $"{label} 실패 (exitCode={exitCode}, 오류 라인 미검출, 경고 일부 표시)\n{joined}";
+            }
+
+            if (normalized.Length > 1000)
+                normalized = normalized.Substring(normalized.Length - 1000);
+
+            return $"{label} {(succeeded ? "성공" : "실패")} (exitCode={exitCode})\n{normalized}";
+        }
+
+        private static bool TryGetVisualStudioMsBuildPath(out string path)
+        {
+            path = string.Empty;
+
+            var candidates = new[]
+            {
+                @"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
+                @"C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe",
+                @"C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
+            };
+
+            foreach (var candidate in candidates)
+            {
+                if (File.Exists(candidate))
+                {
+                    path = candidate;
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 

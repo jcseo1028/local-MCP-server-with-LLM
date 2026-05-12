@@ -31,6 +31,8 @@ public sealed class LlmSection
     public string DefaultModel { get; set; } = "qwen2.5-coder:7b";
     public string? GeneralModel { get; set; }
     public string? SummaryModel { get; set; }
+    public string? LargeFileModel { get; set; }
+    public int RequestTimeoutMinutes { get; set; } = 20;
 }
 
 public sealed class ToolsSection

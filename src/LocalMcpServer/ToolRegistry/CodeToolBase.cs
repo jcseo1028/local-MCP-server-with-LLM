@@ -35,7 +35,14 @@ public abstract class CodeToolBase : IMcpTool
     };
 
     /// <summary>코드 수정 도구는 기본적으로 코드 모델(DefaultModel)로 실행한다.</summary>
-    protected virtual string ResolveToolModel() => _config.Llm.DefaultModel;
+    protected virtual string ResolveToolModel(Dictionary<string, object?> arguments)
+    {
+        var overrideModel = GetStringArg(arguments, "model");
+        if (!string.IsNullOrWhiteSpace(overrideModel))
+            return overrideModel;
+
+        return _config.Llm.DefaultModel;
+    }
 
     public async Task<ToolCallResult> ExecuteAsync(Dictionary<string, object?> arguments, CancellationToken ct = default)
     {
@@ -66,7 +73,7 @@ public abstract class CodeToolBase : IMcpTool
         var llmResponse = await _llm.GenerateAsync(new LlmRequest
         {
             Prompt = prompt,
-            Model = ResolveToolModel(),
+            Model = ResolveToolModel(arguments),
             Options = GetLlmOptions()
         }, ct);
 
