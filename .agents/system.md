@@ -26,6 +26,7 @@
 | Tool Registry | MCP 도구의 등록, 조회, 실행을 처리한다 |
 | LLM Connector | 로컬 LLM과의 통신을 추상화하고 요청/응답을 변환한다 |
 | Resource Cache | 현장 필수 자료(문서, 표준, 참조 데이터)를 로컬에서 조회 가능하게 관리한다 |
+| RAG/Vector Search | 코드 chunk 분할, embedding 생성, 의미 검색으로 대용량 컨텍스트를 축소한다 |
 | Configuration | 서버, 모델, 도구, 캐시 설정을 중앙 관리한다 |
 
 ## Non-Goals

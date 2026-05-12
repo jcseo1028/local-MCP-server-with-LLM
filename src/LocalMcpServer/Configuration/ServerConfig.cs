@@ -9,6 +9,7 @@ public sealed class ServerConfig
 {
     public ServerSection Server { get; set; } = new();
     public LlmSection Llm { get; set; } = new();
+    public RagSection Rag { get; set; } = new();
     public ToolsSection Tools { get; set; } = new();
     public ChatSection Chat { get; set; } = new();
     public CacheSection Cache { get; set; } = new();
@@ -33,6 +34,17 @@ public sealed class LlmSection
     public string? SummaryModel { get; set; }
     public string? LargeFileModel { get; set; }
     public int RequestTimeoutMinutes { get; set; } = 20;
+}
+
+public sealed class RagSection
+{
+    public bool Enabled { get; set; } = true;
+    public string DbPath { get; set; } = "";
+    public int MinFileLineCount { get; set; } = 500;
+    public int TopKChunks { get; set; } = 5;
+    public float SimilarityThreshold { get; set; } = 0.5f;
+    public int MaxContextChars { get; set; } = 5000;
+    public string EmbeddingModel { get; set; } = "nomic-embed-text";
 }
 
 public sealed class ToolsSection

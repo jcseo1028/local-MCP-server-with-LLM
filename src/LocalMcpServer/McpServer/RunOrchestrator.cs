@@ -17,6 +17,7 @@ public sealed class RunOrchestrator
     private readonly DocumentSearcher _docSearcher;
     private readonly ToolRegistryService _registry;
     private readonly IResourceCache _cache;
+    private readonly VectorSearchEngine _vectorSearchEngine;
     private readonly ILogger<RunOrchestrator> _logger;
     private readonly RunLogger _runLogger;
     private readonly ServerConfig _config;
@@ -31,6 +32,7 @@ public sealed class RunOrchestrator
         DocumentSearcher docSearcher,
         ToolRegistryService registry,
         IResourceCache cache,
+        VectorSearchEngine vectorSearchEngine,
         IOptions<ServerConfig> config,
         RunLogger runLogger,
         ILogger<RunOrchestrator> logger)
@@ -40,6 +42,7 @@ public sealed class RunOrchestrator
         _docSearcher = docSearcher;
         _registry = registry;
         _cache = cache;
+        _vectorSearchEngine = vectorSearchEngine;
         _config = config.Value;
         _chatConfig = config.Value.Chat;
         _runLogger = runLogger;
@@ -294,9 +297,33 @@ public sealed class RunOrchestrator
                 return;
             }
 
-            // 3. 컨텍스트 수집 — §8c 컨텍스트 검증
+            // 3. 컨텍스트 수집 — §8c 컨텍스트 검증 (RAG 우선 적용)
             var s3 = run.GetStage(StageIds.ContextCollection);
             s3.Start();
+            
+            string ragContext = string.Empty;
+            if (run.Code is not null && run.ActiveFilePath is not null)
+            {
+                // RAG 먼저 조립 (절단 전)
+                _logger.LogInformation(
+                    "Run {RunId} RAG 시도: toolName={Tool}, path={Path}, codeSize={Size}자",
+                    run.RunId, run.Intent?.ToolName ?? "unknown", run.ActiveFilePath, run.Code.Length);
+                
+                ragContext = await BuildRagContextAsync(
+                    run.Message,
+                    run.ActiveFilePath,
+                    run.Code,
+                    CountLines(run.Code),
+                    ct);
+                
+                if (!string.IsNullOrEmpty(ragContext))
+                {
+                    _logger.LogInformation(
+                        "Run {RunId} RAG 성공: {Size}자 추출",
+                        run.RunId, ragContext.Length);
+                }
+            }
+            
             if (run.Code is not null)
             {
                 const int maxCodeLength = 32_000; // LLM 컨텍스트 윈도우 보호
@@ -304,13 +331,19 @@ public sealed class RunOrchestrator
                 if (originalLength > maxCodeLength)
                 {
                     run.Code = run.Code[..maxCodeLength];
-                    _logger.LogWarning("Run {RunId} 코드 절단: {Original}자 → {Max}자",
-                        run.RunId, originalLength, maxCodeLength);
-                    s3.Complete($"코드 컨텍스트 수집 완료 ({originalLength}자 → {maxCodeLength}자 절단)");
+                    _logger.LogWarning(
+                        "Run {RunId} 코드 절단: {Original}자 → {Max}자 " +
+                        "[RAG={HasRag}, 저장소={EmbeddingStoreReady}]",
+                        run.RunId, originalLength, maxCodeLength,
+                        !string.IsNullOrEmpty(ragContext) ? "조립" : "없음",
+                        _cache.IsAvailable ? "준비" : "미준비");
+                    s3.Complete($"코드 컨텍스트 수집 완료 ({originalLength}자 → {maxCodeLength}자 절단)" +
+                        (!string.IsNullOrEmpty(ragContext) ? " + RAG" : ""));
                 }
                 else
                 {
-                    s3.Complete($"코드 컨텍스트 수집 완료 ({originalLength}자)");
+                    s3.Complete($"코드 컨텍스트 수집 완료 ({originalLength}자)" +
+                        (!string.IsNullOrEmpty(ragContext) ? " + RAG" : ""));
                 }
             }
             else
@@ -616,6 +649,34 @@ public sealed class RunOrchestrator
                 }
 
                 var filesContext = BuildFilesContext(run);
+                if (IntentResolver.IsEditTool(toolName) && run.Code is not null)
+                {
+                    _logger.LogInformation(
+                        "Run {RunId} RAG 시도: toolName={Tool}, activeFilePath={Path}, codeSize={Size}자",
+                        run.RunId, toolName, run.ActiveFilePath ?? "(null)", run.Code.Length);
+                    
+                    var ragContext = await BuildRagContextAsync(
+                        run.Message, 
+                        run.ActiveFilePath ?? string.Empty, 
+                        run.Code, 
+                        CountLines(run.Code), 
+                        ct);
+                    
+                    if (!string.IsNullOrWhiteSpace(ragContext))
+                    {
+                        _logger.LogInformation(
+                            "Run {RunId} RAG Context 주입됨: {Size}자",
+                            run.RunId, ragContext.Length);
+                        filesContext = string.IsNullOrWhiteSpace(filesContext) ? ragContext : ragContext + "\n\n" + filesContext;
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "Run {RunId} RAG Context 비어있음 (검색 결과 없음)",
+                            run.RunId);
+                    }
+                }
+
                 var arguments = new Dictionary<string, object?>
                 {
                     ["code"] = run.Code ?? "",
@@ -800,6 +861,7 @@ public sealed class RunOrchestrator
             var language = file.Language ?? run.Language ?? "";
             var lineCount = CountLines(fullCode);
             var selectedModel = GetOptimalModelForFile(lineCount);
+            var ragContext = string.Empty;
 
             // 6.3-1/3/4: 초대형 파일(2000줄 초과)은 메서드 단위 우선, 실패 시 라인 청크로 분할 처리.
             // 모든 청크가 성공할 때만 반영하는 트랜잭션 방식으로 원자성을 보장한다.
@@ -838,6 +900,11 @@ public sealed class RunOrchestrator
 
                 continue;
             }
+
+            if (!file.SelectionOnly)
+            {
+                ragContext = await BuildRagContextAsync(run.Message, file.FilePath, sourceCode, lineCount, ct);
+            }
             
             // v2.6.6: 파일 크기에 따라 전달 코드 길이를 동적으로 조절한다.
             var maxCodeForPerFile = GetOptimalMaxPerFileChars(lineCount, file.SelectionOnly);
@@ -851,7 +918,7 @@ public sealed class RunOrchestrator
                 ["code"] = sourceCode,
                 ["language"] = language,
                 ["model"] = selectedModel,
-                ["files_context"] = "",
+                ["files_context"] = ragContext,
                 ["related_files_context"] = BuildRelatedFilesContext(run, file.FilePath)
             };
 
@@ -1101,6 +1168,7 @@ public sealed class RunOrchestrator
         string selectedModel,
         CancellationToken ct)
     {
+        var ragContext = await BuildRagContextAsync(run.Message, file.FilePath, fullCode, CountLines(fullCode), ct);
         var chunks = SplitIntoMethodModeChunks(fullCode, MethodModeChunkLineLimit);
         if (chunks.Count <= 1)
             chunks = SplitIntoLineChunks(fullCode, LineChunkSize);
@@ -1115,7 +1183,7 @@ public sealed class RunOrchestrator
                 ["code"] = chunk,
                 ["language"] = language,
                 ["model"] = selectedModel,
-                ["files_context"] = "",
+                ["files_context"] = ragContext,
                 ["related_files_context"] = BuildRelatedFilesContext(run, file.FilePath)
             };
 
@@ -1357,6 +1425,84 @@ public sealed class RunOrchestrator
             return sb.ToString(0, MaxRelatedChars) + "\n...(생략)";
 
         return sb.ToString();
+    }
+
+    private async Task<string> BuildRagContextAsync(string query, string currentFilePath, string sourceCode, int lineCount, CancellationToken ct)
+    {
+        var rag = _config.Rag;
+        
+        // RAG 조건 확인
+        if (!rag.Enabled)
+        {
+            _logger.LogInformation("RAG Context 스킵: RAG 비활성화 (설정)");
+            return string.Empty;
+        }
+        
+        if (lineCount < rag.MinFileLineCount)
+        {
+            _logger.LogInformation("RAG Context 스킵: 파일줄수 {LineCount} < 최소 {Min}줄", lineCount, rag.MinFileLineCount);
+            return string.Empty;
+        }
+
+        try
+        {
+            var searchQuery = string.IsNullOrWhiteSpace(query) ? sourceCode : query;
+            var chunks = await _vectorSearchEngine.SearchAsync(searchQuery, rag.TopKChunks, rag.SimilarityThreshold, ct);
+            
+            if (chunks.Count == 0)
+            {
+                _logger.LogWarning("RAG 검색 결과 없음: 쿼리='{Query}' (길이={Len}), 유사도기준={Threshold}, 저장소상태={EmbeddingStoreReady}",
+                    searchQuery.Length > 100 ? searchQuery[..100] + "..." : searchQuery, 
+                    searchQuery.Length, 
+                    rag.SimilarityThreshold,
+                    _cache.IsAvailable ? "준비됨" : "미준비");
+                return string.Empty;
+            }
+
+            var preferred = chunks
+                .Where(chunk => !string.IsNullOrWhiteSpace(currentFilePath) &&
+                                !chunk.Chunk.FilePath.Equals(currentFilePath, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (preferred.Count == 0)
+                preferred = chunks;
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("## RAG 관련 코드");
+            sb.AppendLine("다음 조각은 의미 기반 검색으로 선택한 참고용 컨텍스트다. 현재 코드와 함께 읽고, 불필요한 다른 파일 수정은 하지 않는다.");
+            sb.AppendLine();
+
+            foreach (var chunk in preferred)
+            {
+                if (sb.Length >= rag.MaxContextChars)
+                    break;
+
+                sb.AppendLine($"### {chunk.Chunk.FilePath}");
+                sb.AppendLine($"Lines: {chunk.Chunk.StartLine}-{chunk.Chunk.EndLine}");
+                sb.AppendLine($"Similarity: {chunk.Similarity:F2}");
+                if (!string.IsNullOrWhiteSpace(chunk.Chunk.Summary))
+                    sb.AppendLine($"Summary: {chunk.Chunk.Summary}");
+                sb.AppendLine("```csharp");
+                sb.AppendLine(chunk.Chunk.Content.TrimEnd());
+                sb.AppendLine("```");
+                sb.AppendLine();
+            }
+
+            if (sb.Length == 0)
+                return string.Empty;
+
+            var result = sb.Length > rag.MaxContextChars
+                ? sb.ToString(0, rag.MaxContextChars) + "\n...(생략)"
+                : sb.ToString();
+            
+            _logger.LogInformation("RAG Context 조립 완료: {Chunks}개 청크, {Size}자", preferred.Count, result.Length);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "RAG Context 조립 실패: {Error}", ex.Message);
+            return string.Empty;
+        }
     }
 
     private static string SummarizeFileForContext(string code)

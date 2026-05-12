@@ -19,7 +19,7 @@
 - **IntentResolver**: 사용자 메시지를 분석하여 적절한 도구를 선택한다. LLM Connector를 직접 호출하되, 이는 "도구 실행"이 아닌 "라우팅 결정"이다. v2.1에서 **계획 수립**(최대 5개 항목) 역할도 포함한다.
 - **IntentResolver 모델 분기 (v2.6.2)**: 의도 분석/계획 수립은 `Chat.IntentModel` 우선(없으면 `Llm.GeneralModel`), 일반 대화 응답은 `Chat.ChatModel` 우선, 결과 요약은 `Llm.SummaryModel` 우선으로 분리한다.
 - **DocumentSearcher (v2.1)**: `Config.documentSearch.directories` 내 로컬 문서를 검색한다. Resource Cache를 통해 조회하며, 문서가 없으면 Skipped 처리한다. 외부 네트워크를 호출하지 않는다.
-- **RunOrchestrator (v2.1/v2.6)**: Run 단위로 9단계 상태 머신을 관리한다. IntentResolver, DocumentSearcher, Tool Registry를 순차 호출하고 단계별 상태를 ConversationStore에 기록한다. context_collection 단계에서 코드 크기 검증(32KB 절단)을 수행한다. **A-2**: `BuildFileChange()`에서 `DiffEngine.Compute()`를 호출하여 `FileChange.Hunks`를 사전 계산하고 proposal에 포함한다. **B-4**: `ParseFileBlocks()`가 1차 `[FILE:]…[/FILE]` 파싱 후 실패 시 2차 마크다운 헤딩(`### path.ext`, `**path.ext**`, `// File:`) 패턴 폴백 파싱. **B-5**: `BuildFilesContext()`에서 파일당 8,000자 / 전체 32,000자 제한 적용, 임시표 `파일별 비율 분배` 절단, 프롬프트 내 생략 표시. **SC-4**: 멀티파일 입력에서 `[FILE:]` 파싱 실패 시 단건 조용한 폴백 없이 1회 재시도 후 명시적 실패 처리. **SC-5**: `organize_imports` 결과는 using/import 외 본문 변경 여부를 검증하고, 본문이 변경된 경우 import 블록만 원본 본문에 자동 투영(자동 보정) 후 재검증한다. **v2.6**: `allowMultiToolPlan/maxPlanSteps` 기반 다중 도구 실행 계획(`PlanSteps`)을 구성하며, 코드 변경 단계는 `PendingPatch` 상태로 추적하고 `confirm/revert` API로 확정/되돌리기 상태 전이를 지원한다.
+- **RunOrchestrator (v2.1/v2.6)**: Run 단위로 9단계 상태 머신을 관리한다. IntentResolver, DocumentSearcher, Tool Registry를 순차 호출하고 단계별 상태를 ConversationStore에 기록한다. context_collection 단계에서 코드 크기 검증(32KB 절단)을 수행한다. **A-2**: `BuildFileChange()`에서 `DiffEngine.Compute()`를 호출하여 `FileChange.Hunks`를 사전 계산하고 proposal에 포함한다. **B-4**: `ParseFileBlocks()`가 1차 `[FILE:]…[/FILE]` 파싱 후 실패 시 2차 마크다운 헤딩(`### path.ext`, `**path.ext**`, `// File:`) 패턴 폴백 파싱. **B-5**: `BuildFilesContext()`에서 파일당 8,000자 / 전체 32,000자 제한 적용, 임시표 `파일별 비율 분배` 절단, 프롬프트 내 생략 표시. RAG 활성화 시 `VectorSearchEngine` 검색 결과를 `files_context`에 주입해 대용량 파일의 관련 조각을 함께 전달한다. **SC-4**: 멀티파일 입력에서 `[FILE:]` 파싱 실패 시 단건 조용한 폴백 없이 1회 재시도 후 명시적 실패 처리. **SC-5**: `organize_imports` 결과는 using/import 외 본문 변경 여부를 검증하고, 본문이 변경된 경우 import 블록만 원본 본문에 자동 투영(자동 보정) 후 재검증한다. **v2.6**: `allowMultiToolPlan/maxPlanSteps` 기반 다중 도구 실행 계획(`PlanSteps`)을 구성하며, 코드 변경 단계는 `PendingPatch` 상태로 추적하고 `confirm/revert` API로 확정/되돌리기 상태 전이를 지원한다.
 - **RunOrchestrator 안정화 (v2.6.1)**: 다중 도구 계획 키워드에 `리팩토링`을 추가해 `refactor_current_code` 단계 생성 누락을 줄였다. 계획 파서는 빈/공백 응답을 무의미한 1개 항목으로 승격하지 않도록 정리했다. 멀티파일 파싱 재시도는 Run 전체 남은 시간 예산(최소 90초) 확인 후 수행하며, 예산 부족 시 재시도를 생략하고 명시적 안내를 반환한다. `OperationCanceledException` 로그는 타임아웃 취소와 외부 취소를 분리해 기록한다.
 - **RunOrchestrator 예산 분리 (v2.6.3)**: 전체 Run 예산(10분)과 step 실행 예산(기본 4분)을 분리하고, 승인 대기/클라이언트 빌드·테스트 대기 시간은 예산 계산에서 제외한다. 멀티파일 재시도 여부도 `실제 남은 실행 예산` 기준으로 판단한다.
 - **RunOrchestrator 파일별 편집 조합 (v2.6.4)**: `organize_imports`, `refactor_current_code` 같은 편집 도구는 멀티파일 응답 포맷을 모델에게 강제하지 않고, 선택된 파일마다 단건 모드로 실행한 뒤 서버가 `FileChange` 목록으로 조합한다. 다른 선택 파일은 요약된 보조 컨텍스트로만 전달한다.
@@ -28,6 +28,7 @@
 - **RunOrchestrator 타임아웃 조정 (v2.6.6)**: 32b 추론 지연을 고려해 Run 예산을 30분, step 실행 예산을 12분으로 상향했다. 후처리 단계 제한은 15분, 최종 요약 제한은 10분으로 조정했다.
 - **RunOrchestrator 대용량 분할 처리 (v2.6.7)**: 2000줄 초과 파일은 메서드 단위 분할 모드(실패 시 라인 청크 분할)로 처리한다. 청크별 도구 실행이 모두 성공할 때만 최종 코드를 반영하여 원자성을 보장한다.
 - **RunOrchestrator 자동 구문 복구 (v2.6.7)**: C# 출력에서 괄호/중괄호 불균형을 감지하면 닫힘 토큰 보정으로 1차 자동 복구를 시도한다. 복구 실패 시 해당 수정안을 거부한다.
+- **RAG Phase 1 코드 분할기 (v2.6.7)**: `CodeChunker`를 추가해 C# 파일을 class/region/method 기준으로 분할하고, 초과 길이는 라인 블록(overlap 포함)으로 재분할한다. 본 단계는 파싱/분할 유틸 구현 범위이며 벡터 저장/검색 통합은 Phase 2 이후에 진행한다.
 - **검증 모드**: `ChatRunStartRequest.intentAndPlanOnly=true` 이면 RunOrchestrator가 의도 분석과 계획 수립까지만 수행하고, 후속 단계는 Skipped 처리한 뒤 즉시 완료한다. 느린 LLM 환경에서 의도/계획의 타당성을 우선 검증하기 위한 모드다.
 - **ConversationStore**: 대화 상태를 메모리 내 관리. 대화 이력을 LLM 컨텍스트에 포함. v2.1에서 **run 단위 실행 상태**도 함께 관리. 향후 SQLite 등 경량 DB 마이그레이션 가능하도록 인터페이스 분리.
 - **제약**: 모든 LLM 호출은 로컬 엔드포인트(Ollama 등)만 사용. 원격 LLM API 금지. 문서검색은 로컬 파일만 대상.
@@ -69,6 +70,8 @@
 - **제약**: 오프라인 환경 전용. 원격 LLM 엔드포인트를 사용하지 않는다.
 - **다중 모델**: 코드 모델(`DefaultModel`, 코드 변환용)과 일반 모델(`GeneralModel`, 의도 분석·계획·대화·요약용)을 Config 기반으로 선택한다. 호출자가 `LlmRequest.Model`에 적절한 모델을 명시하고, null이면 `SummaryModel → DefaultModel` 순으로 폴백한다. 모델 선택 시 `string.IsNullOrEmpty` 검증으로 빈 문자열도 fallback 처리한다.
 - **요청 타임아웃 (v2.6.6)**: `Program.cs`의 `AddHttpClient<OllamaConnector>()`에서 `Llm.RequestTimeoutMinutes`를 적용한다. 기본값은 20분이며 32b 모델 장시간 추론을 허용한다.
+- **Embedding Connector (v2.6.7 Phase 2)**: `EmbeddingConnector`가 Ollama `/api/embed`를 호출해 텍스트를 벡터로 변환한다. 기본 모델은 `Rag.EmbeddingModel`이며 미설정 시 `nomic-embed-text`를 사용한다.
+- **Vector Search Engine (v2.6.7 Phase 3)**: `VectorSearchEngine`가 `CodeChunker`와 `EmbeddingConnector`를 조합해 코드 파일을 chunk로 분할하고 코사인 유사도로 관련 chunk를 검색한다. `IResourceCache`의 현재 인덱스 루트와 색인 파일 목록을 활용하며, chunk embedding은 `ResourceCache`의 영속 저장소에 보관한다.
 - **구현**: `LlmConnector/` — OllamaConnector (`/api/chat` 엔드포인트), LlmModels
 
 ## 4. Resource Cache
@@ -88,6 +91,8 @@
   - VSIX Run 시작 시 SolutionPath를 서버에 전송 → `ReindexAsync`로 동적 재인덱싱
   - `ReaderWriterLockSlim`으로 검색/재인덱싱 간 스레드 안전성 확보
   - 같은 루트 경로면 재인덱싱 스킵
+  - `GetIndexedCodeFiles()`로 현재 인덱스 대상 파일 목록을 제공해 RAG Vector Search가 chunk 후보를 구성한다.
+  - `GetChunkEmbeddingAsync()` / `StoreChunkEmbeddingAsync()`로 chunk embedding을 SQLite(`rag-index.sqlite`)에 영속 저장해 재계산 비용을 줄인다.
 
 ## 5. Configuration
 

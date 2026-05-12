@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using LocalMcpServer.Configuration;
 using Microsoft.Extensions.Options;
 
@@ -20,6 +21,7 @@ public sealed class ResourceCacheService : IResourceCache
     private Dictionary<string, List<CodeSearchResult>> _symbolIndex = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, List<CodeSearchResult>> _textIndex = new(StringComparer.OrdinalIgnoreCase);
     private readonly ReaderWriterLockSlim _indexLock = new();
+    private readonly ConcurrentDictionary<string, float[]> _chunkEmbeddingCache = new(StringComparer.OrdinalIgnoreCase);
     private string? _currentIndexRoot;
 
     private bool _initialized;
@@ -29,6 +31,34 @@ public sealed class ResourceCacheService : IResourceCache
         _cacheConfig = config.Value.Cache;
         _codeIndexConfig = config.Value.CodeIndex;
         _logger = logger;
+        
+        // SQLitePCL 동적 초기화 (리플렉션 이용)
+        InitializeSQLiteProvider();
+    }
+    
+    /// <summary>
+    /// SQLitePCL을 동적으로 초기화한다.
+    /// Microsoft.Data.Sqlite와의 호환성을 위해 필수.
+    /// </summary>
+    private void InitializeSQLiteProvider()
+    {
+        try
+        {
+            // 어셈블리 동적 로드 시도 (SQLitePCL.batteries 패키지)
+            var asm = System.Reflection.Assembly.Load("SQLitePCL.batteries");
+            var batteryType = asm.GetType("SQLitePCL.Batteries");
+            if (batteryType != null)
+            {
+                var initMethod = batteryType.GetMethod("Init",
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                initMethod?.Invoke(null, null);
+                _logger.LogDebug("SQLitePCL.Batteries 초기화 성공");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "SQLitePCL 동적 로드 시도 중 예외 (계속 진행)");
+        }
     }
 
     public bool IsAvailable => _initialized;
@@ -287,6 +317,7 @@ public sealed class ResourceCacheService : IResourceCache
     {
         int fileCount = 0;
         int symbolCount = 0;
+        _indexedCodeFiles.Clear();
 
         foreach (var pattern in _codeIndexConfig.FilePatterns)
         {
@@ -301,6 +332,7 @@ public sealed class ResourceCacheService : IResourceCache
                 {
                     var lines = File.ReadAllLines(file);
                     fileCount++;
+                    _indexedCodeFiles.Add(file);
 
                     // 심볼 추출 (정규식 기반)
                     symbolCount += ExtractSymbols(file, lines, symbolIndex);
@@ -615,6 +647,47 @@ public sealed class ResourceCacheService : IResourceCache
         finally
         {
             _indexLock.ExitReadLock();
+        }
+    }
+
+    // ── RAG (Retrieval Augmented Generation) 관련 ──
+    
+    /// <inheritdoc/>
+    public IReadOnlyList<string> GetIndexedCodeFiles()
+    {
+        _indexLock.EnterReadLock();
+        try
+        {
+            return _indexedCodeFiles.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        finally
+        {
+            _indexLock.ExitReadLock();
+        }
+    }
+    
+    private readonly List<string> _indexedCodeFiles = new();
+
+    /// <inheritdoc/>
+    public async Task<float[]?> GetChunkEmbeddingAsync(string chunkKey, CancellationToken ct = default)
+    {
+        if (_chunkEmbeddingCache.TryGetValue(chunkKey, out var embedding))
+            return await Task.FromResult<float[]?>(embedding);
+
+        return await Task.FromResult<float[]?>(null);
+    }
+
+    /// <inheritdoc/>
+    public async Task StoreChunkEmbeddingAsync(string chunkKey, float[] embedding, CancellationToken ct = default)
+    {
+        try
+        {
+            _chunkEmbeddingCache[chunkKey] = embedding;
+            await Task.CompletedTask;
+        }
+        catch
+        {
+            _logger.LogDebug("Embedding 저장 실패: {ChunkKey}", chunkKey);
         }
     }
 }

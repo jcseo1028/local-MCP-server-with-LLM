@@ -1,0 +1,14 @@
+# Build outputs
+**/bin/
+**/obj/
+
+# User/IDE files
+.vs/
+*.user
+*.suo
+
+# Local RAG/Cache data
+.localmcp/
+
+# Temporary local validation runners
+src/LocalMcpServer.Phase1Tests/

@@ -133,6 +133,25 @@ CodeSearchResponse {
     }
   ]
 }
+
+IndexedCodeFilesRequest {}
+
+IndexedCodeFilesResponse {
+  files: [string]       // 현재 코드 인덱스 루트 기준의 색인 대상 파일 경로 목록
+}
+
+ChunkEmbeddingRequest {
+  chunkKey: string      // filePath:startLine-endLine:contentHash 형태의 영속 키
+}
+
+ChunkEmbeddingResponse {
+  embedding: number[] | null  // 저장된 embedding 벡터 (없으면 null)
+}
+
+StoreChunkEmbeddingRequest {
+  chunkKey: string      // 영속 키
+  embedding: number[]   // 저장할 embedding 벡터
+}
 ```
 
 ## 5. Configuration Schema
@@ -154,6 +173,15 @@ Config {
     summaryModel: string | null  // 보조 요약 모델명 (선택, null이면 generalModel → defaultModel 사용)
     largeFileModel: string | null // 대용량 코드(800줄 이상) 전용 모델명 (권장: qwen2.5-coder:32b)
     requestTimeoutMinutes: number // LLM HTTP 요청 타임아웃(분), 기본 20
+  }
+  rag: {
+    enabled: boolean      // RAG 기능 활성화 여부
+    dbPath: string        // SQLite 인덱스 DB 경로 (빈 문자열이면 기본 규칙 사용)
+    minFileLineCount: number // RAG 적용 최소 파일 줄 수 (기본 500)
+    topKChunks: number    // 벡터 검색 상위 chunk 수 (기본 5)
+    similarityThreshold: number // 벡터 유사도 임계값 0~1 (기본 0.5)
+    maxContextChars: number // LLM 전달 최대 context 길이 (기본 5000)
+    embeddingModel: string // 임베딩 모델명 (기본 nomic-embed-text)
   }
   tools: {
     directory: string     // 도구 정의 디렉터리 경로

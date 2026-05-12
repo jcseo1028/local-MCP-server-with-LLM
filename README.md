@@ -10,7 +10,7 @@
 - **코드 모델**: qwen2.5-coder:7b (코드 변환·수정용)
 - **일반 모델**: gemma4 (의도 분석·계획·대화·요약용)
 - **접속 방식**: SSE (VS 2022 Agent mode) 또는 Direct REST API (오프라인 CLI)
-- **상태**: 7개 도구 구현 (summarize·add_comments·refactor·organize_imports·fix·search_project_code·suggest_fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v2.0 (채팅 UI·의도 분석·자동 도구 선택·승인 흐름·side-by-side diff) · **v2.1 구현 완료** (다단계 오케스트레이션·계획수립·문서검색·빌드/테스트·결과요약·단계별 UI) · Resource Cache 구현 완료 · **v2.2 구현 완료** (멀티파일 컨텍스트 전송·[FILE:] 프롬프트 안내·ApplyResults 전송) · **v2.3 구현 완료** (파일별 승인/거부 UI·파일 선택 UI·atomic rollback·[FILE:] 폴백 파싱) · **v2.4 구현 완료** (per-hunk accept/reject UI·unified diff 컬러 하이라이트·서버 측 hunks 사전 계산·대용량 파일 토큰 초과 대응) · **v2.5 구현 완료** (organize_imports 도구 추가·멀티파일 출력 엄격 모드·using/import 전용 검증 및 자동 보정) · **v2.6 구현 완료** (다중 도구 실행 계획 + PendingPatch 확정/되돌리기 API)
+- **상태**: 7개 도구 구현 (summarize·add_comments·refactor·organize_imports·fix·search_project_code·suggest_fix) · VS 2022 연동 · CLI REST 검증 · VS 2022 확장(VSIX) v2.0 (채팅 UI·의도 분석·자동 도구 선택·승인 흐름·side-by-side diff) · **v2.1 구현 완료** (다단계 오케스트레이션·계획수립·문서검색·빌드/테스트·결과요약·단계별 UI) · Resource Cache 구현 완료 · **v2.2 구현 완료** (멀티파일 컨텍스트 전송·[FILE:] 프롬프트 안내·ApplyResults 전송) · **v2.3 구현 완료** (파일별 승인/거부 UI·파일 선택 UI·atomic rollback·[FILE:] 폴백 파싱) · **v2.4 구현 완료** (per-hunk accept/reject UI·unified diff 컬러 하이라이트·서버 측 hunks 사전 계산·대용량 파일 토큰 초과 대응) · **v2.5 구현 완료** (organize_imports 도구 추가·멀티파일 출력 엄격 모드·using/import 전용 검증 및 자동 보정) · **v2.6 구현 완료** (다중 도구 실행 계획 + PendingPatch 확정/되돌리기 API) · **v2.7 구현 완료** (RAG chunk/embedding/vector search + SQLite 영속 저장소)
 - **비목표**: GitHub Copilot 대체
 
 ## 구성
@@ -51,6 +51,8 @@ dotnet run
 ```
 
 서버가 `http://localhost:5100` 에서 시작된다.
+
+RAG가 활성화되면 기본적으로 `<solution-root>/.localmcp/rag-index.sqlite`에 chunk embedding이 저장된다. `Rag.DbPath`를 설정하면 이 위치를 덮어쓸 수 있다.
 
 ### 3. VS 2022 연결 (온라인 환경)
 
@@ -106,6 +108,15 @@ Invoke-RestMethod http://localhost:5100/api/tools/call -Method POST `
 | `fix_code_issues` | 버그·안티패턴·보안 취약점 탐지 및 수정 | ✅ 구현 완료 |
 | `search_project_code` | 프로젝트 내 코드 검색 | ✅ 구현 완료 (Resource Cache 필요) |
 | `suggest_fix_from_error_log` | 에러 로그 기반 수정 제안 | ✅ 구현 완료 |
+
+#### RAG 인프라
+
+| 구성요소 | 설명 | 상태 |
+|----------|------|------|
+| `CodeChunker` | C# 코드 class/region/method 단위 chunk 분할 | ✅ 구현 완료 |
+| `EmbeddingConnector` | Ollama `/api/embed` 호출로 embedding 생성 | ✅ 구현 완료 |
+| `VectorSearchEngine` | chunk embedding 기반 의미 검색 | ✅ 구현 완료 |
+| `ResourceCache` embedding 저장소 | `rag-index.sqlite`에 chunk embedding 영속 저장 | ✅ 구현 완료 |
 
 #### v2.1 오케스트레이션 내부 서비스
 

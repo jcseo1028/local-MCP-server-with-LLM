@@ -38,4 +38,20 @@ public interface IResourceCache
     /// analyze_project_structure 도구가 사용한다.
     /// </summary>
     string GetProjectStructureSummary();
+
+    /// <summary>
+    /// 현재 코드 인덱스 루트 기준으로 색인 대상 파일 경로를 반환한다.
+    /// RAG/검색 계층이 chunk 생성을 위해 사용한다.
+    /// </summary>
+    IReadOnlyList<string> GetIndexedCodeFiles();
+
+    /// <summary>
+    /// chunk key에 해당하는 embedding을 조회한다.
+    /// </summary>
+    Task<float[]?> GetChunkEmbeddingAsync(string chunkKey, CancellationToken ct = default);
+
+    /// <summary>
+    /// chunk key에 해당하는 embedding을 저장한다.
+    /// </summary>
+    Task StoreChunkEmbeddingAsync(string chunkKey, float[] embedding, CancellationToken ct = default);
 }

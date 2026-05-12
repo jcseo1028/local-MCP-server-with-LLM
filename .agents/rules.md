@@ -79,3 +79,10 @@
 - 리팩토링 도구는 금지사항 섹션에 제약 명시
 - "using 정리만" 같은 좁은 범위 명시적 기록
 - 리팩토링 도구는 단독 실행, 다른 기능과 혼합 금지
+
+## 10. RAG 저장소 규칙
+
+- RAG chunk embedding 저장은 `rag-index.sqlite`를 사용한다.
+- 기본 경로는 `<solution-root>/.localmcp/rag-index.sqlite`이며, `Rag.DbPath`가 있으면 이를 우선한다.
+- `VectorSearchEngine`은 `IResourceCache`를 통해 embedding을 조회/저장해야 한다.
+- RAG context는 `RunOrchestrator`의 입력 크기를 줄이기 위한 보조 수단이며, 기존 메서드 보존·구문 검증 규칙을 대체하지 않는다.
