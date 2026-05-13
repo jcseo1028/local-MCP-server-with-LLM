@@ -54,4 +54,27 @@ public interface IResourceCache
     /// chunk key에 해당하는 embedding을 저장한다.
     /// </summary>
     Task StoreChunkEmbeddingAsync(string chunkKey, float[] embedding, CancellationToken ct = default);
+
+    /// <summary>
+    /// conversationId + solutionHash 기준의 RAG 세션 상태를 조회한다.
+    /// </summary>
+    Task<ConversationRagState?> GetConversationRagStateAsync(
+        string conversationId,
+        string solutionHash,
+        string embeddingModel,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// conversationId + solutionHash 기준의 RAG 세션 상태를 저장/갱신한다.
+    /// </summary>
+    Task UpsertConversationRagStateAsync(ConversationRagState state, CancellationToken ct = default);
+
+    /// <summary>
+    /// 세션에서 사용한 chunk를 기록한다.
+    /// </summary>
+    Task TouchConversationChunkAsync(
+        string conversationId,
+        string solutionHash,
+        string chunkKey,
+        CancellationToken ct = default);
 }

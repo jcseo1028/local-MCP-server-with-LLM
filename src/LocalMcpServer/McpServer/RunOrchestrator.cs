@@ -67,6 +67,8 @@ public sealed class RunOrchestrator
             ActiveFilePath = req.ActiveFilePath,
             SolutionPath = req.SolutionPath,
             IntentAndPlanOnly = req.IntentAndPlanOnly || _chatConfig.IntentAndPlanOnly,
+            SessionSyncEnabled = req.SessionSyncEnabled,
+            SessionSnapshotVersion = req.SessionSnapshotVersion,
             Files = req.Files,  // v2.2 멀티 파일 컨텍스트
             AllowMultiToolPlan = req.AllowMultiToolPlan,
             MaxPlanSteps = Math.Clamp(req.MaxPlanSteps ?? 3, 1, 5)
@@ -313,6 +315,8 @@ public sealed class RunOrchestrator
                     run.Message,
                     run.ActiveFilePath,
                     run.Code,
+                    run.ConversationId,
+                    ResolveSolutionHashForSession(run),
                     CountLines(run.Code),
                     ct);
                 
@@ -659,6 +663,8 @@ public sealed class RunOrchestrator
                         run.Message, 
                         run.ActiveFilePath ?? string.Empty, 
                         run.Code, 
+                        run.ConversationId,
+                        ResolveSolutionHashForSession(run),
                         CountLines(run.Code), 
                         ct);
                     
@@ -903,7 +909,14 @@ public sealed class RunOrchestrator
 
             if (!file.SelectionOnly)
             {
-                ragContext = await BuildRagContextAsync(run.Message, file.FilePath, sourceCode, lineCount, ct);
+                ragContext = await BuildRagContextAsync(
+                    run.Message,
+                    file.FilePath,
+                    sourceCode,
+                    run.ConversationId,
+                    ResolveSolutionHashForSession(run),
+                    lineCount,
+                    ct);
             }
             
             // v2.6.6: 파일 크기에 따라 전달 코드 길이를 동적으로 조절한다.
@@ -1168,7 +1181,14 @@ public sealed class RunOrchestrator
         string selectedModel,
         CancellationToken ct)
     {
-        var ragContext = await BuildRagContextAsync(run.Message, file.FilePath, fullCode, CountLines(fullCode), ct);
+        var ragContext = await BuildRagContextAsync(
+            run.Message,
+            file.FilePath,
+            fullCode,
+            run.ConversationId,
+            ResolveSolutionHashForSession(run),
+            CountLines(fullCode),
+            ct);
         var chunks = SplitIntoMethodModeChunks(fullCode, MethodModeChunkLineLimit);
         if (chunks.Count <= 1)
             chunks = SplitIntoLineChunks(fullCode, LineChunkSize);
@@ -1427,7 +1447,14 @@ public sealed class RunOrchestrator
         return sb.ToString();
     }
 
-    private async Task<string> BuildRagContextAsync(string query, string currentFilePath, string sourceCode, int lineCount, CancellationToken ct)
+    private async Task<string> BuildRagContextAsync(
+        string query,
+        string currentFilePath,
+        string sourceCode,
+        string? conversationId,
+        string? solutionHash,
+        int lineCount,
+        CancellationToken ct)
     {
         var rag = _config.Rag;
         
@@ -1438,16 +1465,27 @@ public sealed class RunOrchestrator
             return string.Empty;
         }
         
-        if (lineCount < rag.MinFileLineCount)
+        if (lineCount < rag.MinFileLineCount && sourceCode.Length < rag.MinFileCharCount)
         {
-            _logger.LogInformation("RAG Context 스킵: 파일줄수 {LineCount} < 최소 {Min}줄", lineCount, rag.MinFileLineCount);
+            _logger.LogInformation(
+                "RAG Context 스킵: 파일줄수 {LineCount} < 최소 {MinLine}줄 AND 코드길이 {CodeSize} < 최소 {MinChars}자",
+                lineCount,
+                rag.MinFileLineCount,
+                sourceCode.Length,
+                rag.MinFileCharCount);
             return string.Empty;
         }
 
         try
         {
             var searchQuery = string.IsNullOrWhiteSpace(query) ? sourceCode : query;
-            var chunks = await _vectorSearchEngine.SearchAsync(searchQuery, rag.TopKChunks, rag.SimilarityThreshold, ct);
+            var chunks = await _vectorSearchEngine.SearchAsync(
+                searchQuery,
+                rag.TopKChunks,
+                rag.SimilarityThreshold,
+                conversationId,
+                solutionHash,
+                ct);
             
             if (chunks.Count == 0)
             {
@@ -1540,6 +1578,20 @@ public sealed class RunOrchestrator
         }
 
         return string.Join("\n", picked);
+    }
+
+    private string? ResolveSolutionHashForSession(RunData run)
+    {
+        var source = !string.IsNullOrWhiteSpace(run.SolutionPath)
+            ? run.SolutionPath
+            : !string.IsNullOrWhiteSpace(_cache.CurrentIndexRoot)
+                ? _cache.CurrentIndexRoot
+                : _config.CodeIndex.RootPath;
+
+        if (string.IsNullOrWhiteSpace(source))
+            return null;
+
+        return source.Replace('\\', '/');
     }
 
     private static bool IsRelevantContextLine(string line)

@@ -1,5 +1,8 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using LocalMcpServer.Configuration;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 
 namespace LocalMcpServer.ResourceCache;
@@ -22,18 +25,27 @@ public sealed class ResourceCacheService : IResourceCache
     private Dictionary<string, List<CodeSearchResult>> _textIndex = new(StringComparer.OrdinalIgnoreCase);
     private readonly ReaderWriterLockSlim _indexLock = new();
     private readonly ConcurrentDictionary<string, float[]> _chunkEmbeddingCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, ConversationRagState> _conversationRagStates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, ConversationChunkUsage> _conversationChunkUsages = new(StringComparer.OrdinalIgnoreCase);
+    private readonly string _ragDbPath;
+    private volatile bool _ragDbEnabled;
     private string? _currentIndexRoot;
 
     private bool _initialized;
 
-    public ResourceCacheService(IOptions<ServerConfig> config, ILogger<ResourceCacheService> logger)
+    public ResourceCacheService(
+        IOptions<ServerConfig> config,
+        ILogger<ResourceCacheService> logger,
+        IHostEnvironment hostEnvironment)
     {
         _cacheConfig = config.Value.Cache;
         _codeIndexConfig = config.Value.CodeIndex;
         _logger = logger;
+        _ragDbPath = ResolveRagDbPath(config.Value.Rag.DbPath, hostEnvironment.ContentRootPath);
         
         // SQLitePCL 동적 초기화 (리플렉션 이용)
         InitializeSQLiteProvider();
+        InitializeRagStorage();
     }
     
     /// <summary>
@@ -42,6 +54,17 @@ public sealed class ResourceCacheService : IResourceCache
     /// </summary>
     private void InitializeSQLiteProvider()
     {
+        try
+        {
+            SQLitePCL.Batteries.Init();
+            _logger.LogDebug("SQLitePCL.Batteries 초기화 성공 (직접 호출)");
+            return;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "SQLitePCL.Batteries 직접 초기화 실패. 리플렉션 초기화를 시도합니다.");
+        }
+
         try
         {
             // 어셈블리 동적 로드 시도 (SQLitePCL.batteries 패키지)
@@ -59,6 +82,89 @@ public sealed class ResourceCacheService : IResourceCache
         {
             _logger.LogDebug(ex, "SQLitePCL 동적 로드 시도 중 예외 (계속 진행)");
         }
+    }
+
+    private void InitializeRagStorage()
+    {
+        try
+        {
+            var dbDir = Path.GetDirectoryName(_ragDbPath);
+            if (!string.IsNullOrWhiteSpace(dbDir))
+                Directory.CreateDirectory(dbDir);
+
+            using var conn = CreateConnection();
+            conn.Open();
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+
+CREATE TABLE IF NOT EXISTS rag_chunk_embeddings (
+    chunk_key TEXT PRIMARY KEY,
+    embedding_json TEXT NOT NULL,
+    updated_utc TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rag_conversation_state (
+    conversation_id TEXT NOT NULL,
+    solution_hash TEXT NOT NULL,
+    embedding_model TEXT NOT NULL,
+    last_access_utc TEXT NOT NULL,
+    warm_chunk_keys_json TEXT NULL,
+    PRIMARY KEY (conversation_id, solution_hash, embedding_model)
+);
+
+CREATE TABLE IF NOT EXISTS rag_conversation_chunk_usage (
+    conversation_id TEXT NOT NULL,
+    solution_hash TEXT NOT NULL,
+    chunk_key TEXT NOT NULL,
+    last_used_utc TEXT NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (conversation_id, solution_hash, chunk_key)
+);
+
+CREATE INDEX IF NOT EXISTS ix_conv_usage_last_used
+    ON rag_conversation_chunk_usage(last_used_utc);
+
+CREATE INDEX IF NOT EXISTS ix_conv_usage_solution
+    ON rag_conversation_chunk_usage(solution_hash, conversation_id);
+";
+            cmd.ExecuteNonQuery();
+
+            _ragDbEnabled = true;
+            _logger.LogInformation("RAG SQLite 저장소 초기화 완료: {DbPath}", _ragDbPath);
+        }
+        catch (Exception ex)
+        {
+            _ragDbEnabled = false;
+            _logger.LogWarning(ex, "RAG SQLite 저장소 초기화 실패. 메모리 캐시 폴백으로 계속 진행합니다.");
+        }
+    }
+
+    private SqliteConnection CreateConnection()
+    {
+        var cs = new SqliteConnectionStringBuilder
+        {
+            DataSource = _ragDbPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Shared,
+            Pooling = true
+        };
+
+        return new SqliteConnection(cs.ToString());
+    }
+
+    private static string ResolveRagDbPath(string configuredPath, string contentRootPath)
+    {
+        if (!string.IsNullOrWhiteSpace(configuredPath))
+        {
+            return Path.IsPathRooted(configuredPath)
+                ? Path.GetFullPath(configuredPath)
+                : Path.GetFullPath(configuredPath, contentRootPath);
+        }
+
+        return Path.Combine(contentRootPath, ".localmcp", "rag-index.sqlite");
     }
 
     public bool IsAvailable => _initialized;
@@ -674,6 +780,37 @@ public sealed class ResourceCacheService : IResourceCache
         if (_chunkEmbeddingCache.TryGetValue(chunkKey, out var embedding))
             return await Task.FromResult<float[]?>(embedding);
 
+        if (_ragDbEnabled)
+        {
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+
+                using var conn = CreateConnection();
+                conn.Open();
+
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT embedding_json FROM rag_chunk_embeddings WHERE chunk_key = $chunkKey LIMIT 1";
+                cmd.Parameters.AddWithValue("$chunkKey", chunkKey);
+
+                var result = cmd.ExecuteScalar() as string;
+                if (!string.IsNullOrWhiteSpace(result))
+                {
+                    var parsed = JsonSerializer.Deserialize<float[]>(result);
+                    if (parsed is { Length: > 0 })
+                    {
+                        _chunkEmbeddingCache[chunkKey] = parsed;
+                        return parsed;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "SQLite embedding 조회 실패. 메모리 캐시 폴백으로 계속 진행합니다.");
+                _ragDbEnabled = false;
+            }
+        }
+
         return await Task.FromResult<float[]?>(null);
     }
 
@@ -683,11 +820,276 @@ public sealed class ResourceCacheService : IResourceCache
         try
         {
             _chunkEmbeddingCache[chunkKey] = embedding;
+
+            if (_ragDbEnabled)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                using var conn = CreateConnection();
+                conn.Open();
+
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+INSERT INTO rag_chunk_embeddings (chunk_key, embedding_json, updated_utc)
+VALUES ($chunkKey, $embeddingJson, $updatedUtc)
+ON CONFLICT(chunk_key)
+DO UPDATE SET
+  embedding_json = excluded.embedding_json,
+  updated_utc = excluded.updated_utc;";
+                cmd.Parameters.AddWithValue("$chunkKey", chunkKey);
+                cmd.Parameters.AddWithValue("$embeddingJson", JsonSerializer.Serialize(embedding));
+                cmd.Parameters.AddWithValue("$updatedUtc", DateTime.UtcNow.ToString("O"));
+                cmd.ExecuteNonQuery();
+            }
+
             await Task.CompletedTask;
         }
-        catch
+        catch (Exception ex)
         {
-            _logger.LogDebug("Embedding 저장 실패: {ChunkKey}", chunkKey);
+            _logger.LogDebug(ex, "Embedding 저장 실패: {ChunkKey}", chunkKey);
+            _ragDbEnabled = false;
         }
+    }
+
+    /// <inheritdoc/>
+    public Task<ConversationRagState?> GetConversationRagStateAsync(
+        string conversationId,
+        string solutionHash,
+        string embeddingModel,
+        CancellationToken ct = default)
+    {
+        var key = BuildConversationStateKey(conversationId, solutionHash, embeddingModel);
+        if (_conversationRagStates.TryGetValue(key, out var state))
+        {
+            _logger.LogInformation(
+                "RAG 세션 상태 조회: source=memory, conversationId={ConversationId}, warmChunks={WarmChunkCount}",
+                conversationId,
+                state.WarmChunkKeys.Count);
+
+            // 외부에서 상태를 변경해도 내부 참조가 오염되지 않도록 복사본을 반환
+            var copy = new ConversationRagState
+            {
+                ConversationId = state.ConversationId,
+                SolutionHash = state.SolutionHash,
+                EmbeddingModel = state.EmbeddingModel,
+                LastAccessUtc = state.LastAccessUtc,
+                WarmChunkKeys = [.. state.WarmChunkKeys]
+            };
+            return Task.FromResult<ConversationRagState?>(copy);
+        }
+
+        if (_ragDbEnabled)
+        {
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+
+                using var conn = CreateConnection();
+                conn.Open();
+
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+SELECT conversation_id, solution_hash, embedding_model, last_access_utc, warm_chunk_keys_json
+FROM rag_conversation_state
+WHERE conversation_id = $conversationId
+  AND solution_hash = $solutionHash
+  AND embedding_model = $embeddingModel
+LIMIT 1;";
+                cmd.Parameters.AddWithValue("$conversationId", conversationId);
+                cmd.Parameters.AddWithValue("$solutionHash", solutionHash);
+                cmd.Parameters.AddWithValue("$embeddingModel", embeddingModel);
+
+                using var reader = cmd.ExecuteReader();
+                if (reader.Read())
+                {
+                    var warmJson = reader.IsDBNull(4) ? "[]" : reader.GetString(4);
+                    var warmKeys = JsonSerializer.Deserialize<List<string>>(warmJson) ?? [];
+                    var loadedState = new ConversationRagState
+                    {
+                        ConversationId = reader.GetString(0),
+                        SolutionHash = reader.GetString(1),
+                        EmbeddingModel = reader.GetString(2),
+                        LastAccessUtc = DateTime.TryParse(reader.GetString(3), out var parsedUtc)
+                            ? parsedUtc
+                            : DateTime.UtcNow,
+                        WarmChunkKeys = warmKeys
+                    };
+
+                    _conversationRagStates[key] = loadedState;
+                    _logger.LogInformation(
+                        "RAG 세션 상태 조회: source=sqlite, conversationId={ConversationId}, warmChunks={WarmChunkCount}",
+                        conversationId,
+                        loadedState.WarmChunkKeys.Count);
+                    return Task.FromResult<ConversationRagState?>(loadedState);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "SQLite conversation state 조회 실패. 메모리 캐시 폴백으로 계속 진행합니다.");
+                _ragDbEnabled = false;
+            }
+        }
+
+        _logger.LogInformation(
+            "RAG 세션 상태 조회: source=miss, conversationId={ConversationId}, warmChunks=0",
+            conversationId);
+
+        return Task.FromResult<ConversationRagState?>(null);
+    }
+
+    /// <inheritdoc/>
+    public Task UpsertConversationRagStateAsync(ConversationRagState state, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(state.ConversationId) ||
+            string.IsNullOrWhiteSpace(state.SolutionHash) ||
+            string.IsNullOrWhiteSpace(state.EmbeddingModel))
+            return Task.CompletedTask;
+
+        var normalized = new ConversationRagState
+        {
+            ConversationId = state.ConversationId,
+            SolutionHash = state.SolutionHash,
+            EmbeddingModel = state.EmbeddingModel,
+            LastAccessUtc = DateTime.UtcNow,
+            WarmChunkKeys = state.WarmChunkKeys
+                .Where(k => !string.IsNullOrWhiteSpace(k))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(200)
+                .ToList()
+        };
+
+        var key = BuildConversationStateKey(normalized.ConversationId, normalized.SolutionHash, normalized.EmbeddingModel);
+        _conversationRagStates[key] = normalized;
+        _logger.LogInformation(
+            "RAG 세션 상태 저장: conversationId={ConversationId}, warmChunks={WarmChunkCount}, sqliteEnabled={SqliteEnabled}",
+            normalized.ConversationId,
+            normalized.WarmChunkKeys.Count,
+            _ragDbEnabled);
+
+        if (_ragDbEnabled)
+        {
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+
+                using var conn = CreateConnection();
+                conn.Open();
+
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+INSERT INTO rag_conversation_state (
+    conversation_id,
+    solution_hash,
+    embedding_model,
+    last_access_utc,
+    warm_chunk_keys_json)
+VALUES (
+    $conversationId,
+    $solutionHash,
+    $embeddingModel,
+    $lastAccessUtc,
+    $warmChunkKeysJson)
+ON CONFLICT(conversation_id, solution_hash, embedding_model)
+DO UPDATE SET
+  last_access_utc = excluded.last_access_utc,
+  warm_chunk_keys_json = excluded.warm_chunk_keys_json;";
+                cmd.Parameters.AddWithValue("$conversationId", normalized.ConversationId);
+                cmd.Parameters.AddWithValue("$solutionHash", normalized.SolutionHash);
+                cmd.Parameters.AddWithValue("$embeddingModel", normalized.EmbeddingModel);
+                cmd.Parameters.AddWithValue("$lastAccessUtc", normalized.LastAccessUtc.ToString("O"));
+                cmd.Parameters.AddWithValue("$warmChunkKeysJson", JsonSerializer.Serialize(normalized.WarmChunkKeys));
+                cmd.ExecuteNonQuery();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "SQLite conversation state 저장 실패. 메모리 캐시 폴백으로 계속 진행합니다.");
+                _ragDbEnabled = false;
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <inheritdoc/>
+    public Task TouchConversationChunkAsync(
+        string conversationId,
+        string solutionHash,
+        string chunkKey,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(conversationId) ||
+            string.IsNullOrWhiteSpace(solutionHash) ||
+            string.IsNullOrWhiteSpace(chunkKey))
+            return Task.CompletedTask;
+
+        var usageKey = BuildConversationChunkUsageKey(conversationId, solutionHash, chunkKey);
+        _conversationChunkUsages.AddOrUpdate(
+            usageKey,
+            _ => new ConversationChunkUsage
+            {
+                ConversationId = conversationId,
+                SolutionHash = solutionHash,
+                ChunkKey = chunkKey,
+                LastUsedUtc = DateTime.UtcNow,
+                HitCount = 1
+            },
+            (_, old) =>
+            {
+                old.LastUsedUtc = DateTime.UtcNow;
+                old.HitCount++;
+                return old;
+            });
+
+        if (_ragDbEnabled)
+        {
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+
+                using var conn = CreateConnection();
+                conn.Open();
+
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = @"
+INSERT INTO rag_conversation_chunk_usage (
+    conversation_id,
+    solution_hash,
+    chunk_key,
+    last_used_utc,
+    hit_count)
+VALUES (
+    $conversationId,
+    $solutionHash,
+    $chunkKey,
+    $lastUsedUtc,
+    1)
+ON CONFLICT(conversation_id, solution_hash, chunk_key)
+DO UPDATE SET
+  last_used_utc = excluded.last_used_utc,
+  hit_count = rag_conversation_chunk_usage.hit_count + 1;";
+                cmd.Parameters.AddWithValue("$conversationId", conversationId);
+                cmd.Parameters.AddWithValue("$solutionHash", solutionHash);
+                cmd.Parameters.AddWithValue("$chunkKey", chunkKey);
+                cmd.Parameters.AddWithValue("$lastUsedUtc", DateTime.UtcNow.ToString("O"));
+                cmd.ExecuteNonQuery();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "SQLite conversation usage 저장 실패. 메모리 캐시 폴백으로 계속 진행합니다.");
+                _ragDbEnabled = false;
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static string BuildConversationStateKey(string conversationId, string solutionHash, string embeddingModel)
+    {
+        return $"{conversationId}::{solutionHash}::{embeddingModel}";
+    }
+
+    private static string BuildConversationChunkUsageKey(string conversationId, string solutionHash, string chunkKey)
+    {
+        return $"{conversationId}::{solutionHash}::{chunkKey}";
     }
 }

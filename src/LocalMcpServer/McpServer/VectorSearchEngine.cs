@@ -38,6 +38,8 @@ public sealed class VectorSearchEngine
         string query,
         int topK = 5,
         float similarityThreshold = 0.5f,
+        string? conversationId = null,
+        string? solutionHash = null,
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(query))
@@ -63,7 +65,17 @@ public sealed class VectorSearchEngine
             files = EnumerateCodeFiles(rootPath).ToList();
         }
 
-        var scored = new List<CodeChunkScore>();
+        var warmChunkKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(conversationId) && !string.IsNullOrWhiteSpace(solutionHash))
+        {
+            var state = await _cache.GetConversationRagStateAsync(conversationId, solutionHash, _rag.EmbeddingModel, ct);
+            if (state is not null && state.WarmChunkKeys.Count > 0)
+                warmChunkKeys = state.WarmChunkKeys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+
+        var cacheHitCount = 0;
+        var generatedEmbeddingCount = 0;
+        var scored = new List<(CodeChunk Chunk, float Similarity, bool IsWarm, string ChunkKey)>();
         foreach (var file in files)
         {
             ct.ThrowIfCancellationRequested();
@@ -80,7 +92,13 @@ public sealed class VectorSearchEngine
 
             foreach (var chunk in chunks)
             {
-                var embedding = await GetChunkEmbeddingAsync(chunk, ct);
+                var chunkKey = BuildChunkKey(chunk);
+                var (embedding, fromCache) = await GetChunkEmbeddingAsync(chunk, chunkKey, ct);
+                if (fromCache)
+                    cacheHitCount++;
+                else
+                    generatedEmbeddingCount++;
+
                 if (embedding.Length == 0)
                     continue;
 
@@ -88,33 +106,67 @@ public sealed class VectorSearchEngine
                 if (similarity < similarityThreshold)
                     continue;
 
-                scored.Add(new CodeChunkScore(chunk, similarity));
+                scored.Add((chunk, similarity, warmChunkKeys.Contains(chunkKey), chunkKey));
             }
         }
 
-        var results = scored
+        var selected = scored
             .OrderByDescending(x => x.Similarity)
+            .ThenByDescending(x => x.IsWarm)
             .ThenBy(x => x.Chunk.FilePath, StringComparer.OrdinalIgnoreCase)
             .Take(topK)
             .ToList();
 
-        _logger.LogInformation("VectorSearch 결과: query={Query}, candidates={Count}, topK={TopK}", query, scored.Count, results.Count);
+        if (!string.IsNullOrWhiteSpace(conversationId) && !string.IsNullOrWhiteSpace(solutionHash))
+        {
+            foreach (var item in selected)
+            {
+                await _cache.TouchConversationChunkAsync(conversationId, solutionHash, item.ChunkKey, ct);
+            }
+
+            var mergedWarm = selected.Select(s => s.ChunkKey)
+                .Concat(warmChunkKeys)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(200)
+                .ToList();
+
+            await _cache.UpsertConversationRagStateAsync(new ConversationRagState
+            {
+                ConversationId = conversationId,
+                SolutionHash = solutionHash,
+                EmbeddingModel = _rag.EmbeddingModel,
+                LastAccessUtc = DateTime.UtcNow,
+                WarmChunkKeys = mergedWarm
+            }, ct);
+        }
+
+        var results = selected
+            .Select(x => new CodeChunkScore(x.Chunk, x.Similarity))
+            .ToList();
+
+        _logger.LogInformation(
+            "VectorSearch 결과: query={Query}, candidates={Count}, topK={TopK}, warmCandidates={WarmCandidateCount}, selectedWarm={SelectedWarmCount}, cacheHits={CacheHitCount}, generatedEmbeddings={GeneratedEmbeddingCount}",
+            query,
+            scored.Count,
+            results.Count,
+            warmChunkKeys.Count,
+            selected.Count(x => x.IsWarm),
+            cacheHitCount,
+            generatedEmbeddingCount);
         return results;
     }
 
-    private async Task<float[]> GetChunkEmbeddingAsync(CodeChunk chunk, CancellationToken ct)
+    private async Task<(float[] Embedding, bool FromCache)> GetChunkEmbeddingAsync(CodeChunk chunk, string chunkKey, CancellationToken ct)
     {
-        var key = BuildChunkKey(chunk);
-
-        var cached = await _cache.GetChunkEmbeddingAsync(key, ct);
+        var cached = await _cache.GetChunkEmbeddingAsync(chunkKey, ct);
         if (cached is { Length: > 0 })
-            return cached;
+            return (cached, true);
 
         var embedding = await _embeddingConnector.EmbedAsync(chunk.Content, _rag.EmbeddingModel, ct);
         if (embedding.Length > 0)
-            await _cache.StoreChunkEmbeddingAsync(key, embedding, ct);
+            await _cache.StoreChunkEmbeddingAsync(chunkKey, embedding, ct);
 
-        return embedding;
+        return (embedding, false);
     }
 
     private static string BuildChunkKey(CodeChunk chunk)

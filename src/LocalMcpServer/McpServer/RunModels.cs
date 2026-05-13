@@ -132,6 +132,8 @@ public sealed class RunData
     public string? ActiveFilePath { get; set; }
     public string? SolutionPath { get; set; }
     public bool IntentAndPlanOnly { get; set; }
+    public bool SessionSyncEnabled { get; set; } = true;
+    public string? SessionSnapshotVersion { get; set; }
     public List<FileContext>? Files { get; set; } // v2.2 멀티 파일 컨텍스트
     public bool AllowMultiToolPlan { get; set; }
     public int MaxPlanSteps { get; set; } = 3;
@@ -251,6 +253,8 @@ public sealed class ChatRunStartRequest
     public string? ActiveFilePath { get; set; }
     public string? SolutionPath { get; set; }
     public bool IntentAndPlanOnly { get; set; }
+    public bool SessionSyncEnabled { get; set; } = true;
+    public string? SessionSnapshotVersion { get; set; }
     public bool AllowMultiToolPlan { get; set; }
     public int? MaxPlanSteps { get; set; }
 

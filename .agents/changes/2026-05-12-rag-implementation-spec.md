@@ -932,6 +932,7 @@ RAG 인덱스 DB 파일은 프로젝트 루트의 임의 경로가 아니라 아
 - [x] Program.cs 의존성 주입 (CodeChunker, EmbeddingConnector, VectorSearchEngine)
 - [x] SQLite 영구 저장소 구현 (ResourceCacheService 확장)
     - 현재 구현은 SQLite provider 문제를 우회하기 위해 chunk embedding을 인메모리 캐시에 저장하는 fallback으로 동작함
+    - RAG 활성화 조건을 하이브리드(최소 줄수 OR 최소 문자수)로 확장해 중간 크기 파일도 RAG 대상에 포함
 
 ### 6.5 테스트 (2-3일)
 

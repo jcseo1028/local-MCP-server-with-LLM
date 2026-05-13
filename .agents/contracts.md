@@ -152,6 +152,26 @@ StoreChunkEmbeddingRequest {
   chunkKey: string      // 영속 키
   embedding: number[]   // 저장할 embedding 벡터
 }
+
+ConversationRagStateRequest {
+  conversationId: string
+  solutionHash: string
+  embeddingModel: string
+}
+
+ConversationRagStateResponse {
+  conversationId: string
+  solutionHash: string
+  embeddingModel: string
+  lastAccessUtc: string
+  warmChunkKeys: [string]
+} | null
+
+TouchConversationChunkRequest {
+  conversationId: string
+  solutionHash: string
+  chunkKey: string
+}
 ```
 
 ## 5. Configuration Schema
@@ -178,6 +198,7 @@ Config {
     enabled: boolean      // RAG 기능 활성화 여부
     dbPath: string        // SQLite 인덱스 DB 경로 (빈 문자열이면 기본 규칙 사용)
     minFileLineCount: number // RAG 적용 최소 파일 줄 수 (기본 500)
+    minFileCharCount: number // RAG 적용 최소 코드 길이 (기본 7000)
     topKChunks: number    // 벡터 검색 상위 chunk 수 (기본 5)
     similarityThreshold: number // 벡터 유사도 임계값 0~1 (기본 0.5)
     maxContextChars: number // LLM 전달 최대 context 길이 (기본 5000)
@@ -550,6 +571,8 @@ ChatRunStartRequest {
   activeFilePath: string | null // 단일 파일 경로 (하위 호환)
   solutionPath: string | null
   intentAndPlanOnly: boolean    // true이면 의도 분석·계획 수립까지만 실행
+  sessionSyncEnabled: boolean   // true이면 conversation 기반 RAG 세션 동기화 활성화 (기본 true)
+  sessionSnapshotVersion: string | null // 확장-서버 동기화 버전 힌트
   allowMultiToolPlan: boolean   // true이면 단일 프롬프트를 다중 도구 실행 계획으로 확장
   maxPlanSteps: number | null   // 계획 최대 단계 수 (기본 3, 최대 5)
   files: [                      // 멀티 파일 컨텍스트 (null이면 단건 필드 사용) — v2.2

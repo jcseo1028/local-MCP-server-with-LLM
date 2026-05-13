@@ -41,6 +41,7 @@ public sealed class RagSection
     public bool Enabled { get; set; } = true;
     public string DbPath { get; set; } = "";
     public int MinFileLineCount { get; set; } = 500;
+    public int MinFileCharCount { get; set; } = 7000;
     public int TopKChunks { get; set; } = 5;
     public float SimilarityThreshold { get; set; } = 0.5f;
     public int MaxContextChars { get; set; } = 5000;

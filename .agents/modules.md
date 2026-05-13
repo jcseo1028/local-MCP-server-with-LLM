@@ -93,6 +93,7 @@
   - 같은 루트 경로면 재인덱싱 스킵
   - `GetIndexedCodeFiles()`로 현재 인덱스 대상 파일 목록을 제공해 RAG Vector Search가 chunk 후보를 구성한다.
   - `GetChunkEmbeddingAsync()` / `StoreChunkEmbeddingAsync()`로 chunk embedding을 SQLite(`rag-index.sqlite`)에 영속 저장해 재계산 비용을 줄인다.
+  - `GetConversationRagStateAsync()` / `UpsertConversationRagStateAsync()` / `TouchConversationChunkAsync()`로 conversationId 기반 warm chunk 메타를 관리하고, 서버 재시작 후에도 세션별 RAG warm-start를 지원한다.
 
 ## 5. Configuration
 

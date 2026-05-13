@@ -529,6 +529,8 @@ namespace LocalMcpVsExtension.ToolWindows
                     ConversationId = _conversationId ?? "",
                     ActiveFilePath = activeFilePath,
                     SolutionPath = solutionPath,
+                    SessionSyncEnabled = true,
+                    SessionSnapshotVersion = "v1",
                     AllowMultiToolPlan = true,
                     MaxPlanSteps = 3,
                     Files = openFiles.Length > 0 ? openFiles : null

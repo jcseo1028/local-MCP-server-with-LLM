@@ -302,6 +302,8 @@ namespace LocalMcpVsExtension.Services
         public string? ActiveFilePath { get; set; }
         public string? SolutionPath { get; set; }
         public bool IntentAndPlanOnly { get; set; }
+        public bool SessionSyncEnabled { get; set; } = true;
+        public string? SessionSnapshotVersion { get; set; }
         public bool AllowMultiToolPlan { get; set; }
         public int? MaxPlanSteps { get; set; }
 

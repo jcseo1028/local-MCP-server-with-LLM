@@ -43,3 +43,23 @@ public sealed class CodeSearchResult
     public int LineNumber { get; set; }
     public string Snippet { get; set; } = "";
 }
+
+// ── contracts.md §4b: RAG 세션 동기화 ──
+
+public sealed class ConversationRagState
+{
+    public string ConversationId { get; set; } = "";
+    public string SolutionHash { get; set; } = "";
+    public string EmbeddingModel { get; set; } = "nomic-embed-text";
+    public DateTime LastAccessUtc { get; set; } = DateTime.UtcNow;
+    public List<string> WarmChunkKeys { get; set; } = [];
+}
+
+public sealed class ConversationChunkUsage
+{
+    public string ConversationId { get; set; } = "";
+    public string SolutionHash { get; set; } = "";
+    public string ChunkKey { get; set; } = "";
+    public DateTime LastUsedUtc { get; set; } = DateTime.UtcNow;
+    public int HitCount { get; set; }
+}
