@@ -172,6 +172,29 @@ TouchConversationChunkRequest {
   solutionHash: string
   chunkKey: string
 }
+
+ProjectStructureSummaryRequest {
+  maxFiles: number | null     // 최대 파일 수 (null이면 Config.projectSummary.maxProjectFiles 사용)
+  maxChunksPerFile: number | null // 파일당 최대 chunk 수 (null이면 Config.projectSummary.maxProjectChunks 사용)
+}
+
+ProjectStructureSummaryResponse {
+  files: [                    // 프로젝트 주요 파일 목록
+    {
+      filePath: string        // 파일 경로
+      chunks: [               // 파일 내 대표 chunk 목록
+        {
+          key: string         // filePath:startLine-endLine:contentHash
+          type: string        // class | method | region | function (코드 element 타입)
+          name: string | null // class/method/function 이름 (generic element는 null)
+          startLine: number   // chunk 시작 줄
+          endLine: number     // chunk 종료 줄
+          content: string     // chunk 코드 텍스트
+        }
+      ]
+    }
+  ]
+}
 ```
 
 ## 5. Configuration Schema
@@ -227,6 +250,13 @@ Config {
   documentSearch: {
     directories: [string]  // 문서검색 대상 로컬 폴더 목록 (비어있으면 검색 생략)
     filePatterns: [string] // 검색 대상 파일 패턴 (예: ["*.md", "*.txt", "*.pdf"])
+  }
+  projectSummary: {
+    enabled: boolean       // 프로젝트 전체 구조 요약 기능 활성화 (기본 true)
+    outputPath: string | null // 요약 결과 저장 경로 (기본 "<solution-root>/docs/project-summary.md")
+    maxProjectFiles: number // 멀티파일 요약 시 최대 파일 수 (기본 50)
+    maxProjectChunks: number // 파일당 최대 chunk 수 (기본 3)
+    backupOldSummary: boolean // 기존 summary 파일 백업 여부 (기본 true)
   }
   build: {
     offlineMode: boolean   // true이면 --no-restore 등 네트워크 차단 옵션 적용 (기본 true)

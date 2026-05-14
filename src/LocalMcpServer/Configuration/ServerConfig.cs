@@ -16,6 +16,7 @@ public sealed class ServerConfig
     public CodeIndexSection CodeIndex { get; set; } = new();
     public DocumentSearchSection DocumentSearch { get; set; } = new();
     public BuildSection Build { get; set; } = new();
+    public ProjectSummarySection ProjectSummary { get; set; } = new();
 }
 
 public sealed class ServerSection
@@ -86,4 +87,13 @@ public sealed class CodeIndexSection
     public string RootPath { get; set; } = "";
     public string[] FilePatterns { get; set; } = ["*.cs", "*.xaml"];
     public string Strategy { get; set; } = "hybrid";
+}
+
+public sealed class ProjectSummarySection
+{
+    public bool Enabled { get; set; } = true;
+    public string OutputPath { get; set; } = "docs/project-summary.md";
+    public bool BackupOld { get; set; } = false;
+    public int MaxFiles { get; set; } = 50;
+    public int MaxChunks { get; set; } = 200;
 }

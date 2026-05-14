@@ -302,7 +302,21 @@ public sealed class RunOrchestrator
             // 3. 컨텍스트 수집 — §8c 컨텍스트 검증 (RAG 우선 적용)
             var s3 = run.GetStage(StageIds.ContextCollection);
             s3.Start();
-            
+
+            // analyze_project_structure 의도: 전체 프로젝트 구조 컨텍스트 사용
+            bool isProjectStructureAnalysis = string.Equals(
+                run.Intent?.ToolName, "analyze_project_structure", StringComparison.OrdinalIgnoreCase);
+
+            if (isProjectStructureAnalysis && _cache.IsAvailable)
+            {
+                var indexedFiles = _cache.GetIndexedCodeFiles();
+                _logger.LogInformation(
+                    "Run {RunId} 프로젝트 전체 구조 분석 모드: 인덱싱된 파일 {Count}개",
+                    run.RunId, indexedFiles.Count);
+                s3.Complete($"프로젝트 전체 구조 컨텍스트 수집 완료 (인덱싱된 파일 {indexedFiles.Count}개)");
+            }
+            else
+            {
             string ragContext = string.Empty;
             if (run.Code is not null && run.ActiveFilePath is not null)
             {
@@ -353,6 +367,7 @@ public sealed class RunOrchestrator
             else
             {
                 s3.Complete("코드 없음");
+            }
             }
 
             // 4. 문서 검색
@@ -505,7 +520,8 @@ public sealed class RunOrchestrator
     private void InitializePlan(RunData run)
     {
         var seed = run.Intent?.ToolName;
-        var tools = BuildToolPlan(run.Message, seed, run.AllowMultiToolPlan, run.MaxPlanSteps);
+        var hasCodeContext = !string.IsNullOrWhiteSpace(run.Code);
+        var tools = BuildToolPlan(run.Message, seed, run.AllowMultiToolPlan, run.MaxPlanSteps, hasCodeContext);
         run.PlanSteps = tools.Select((t, i) => new RunPlanStep
         {
             StepId = $"step-{i + 1}",
@@ -606,11 +622,20 @@ public sealed class RunOrchestrator
         return patch;
     }
 
-    private static List<string> BuildToolPlan(string message, string? seedToolName, bool allowMultiToolPlan, int maxPlanSteps)
+    private static List<string> BuildToolPlan(
+        string message,
+        string? seedToolName,
+        bool allowMultiToolPlan,
+        int maxPlanSteps,
+        bool hasCodeContext)
     {
         var plan = new List<string>();
         if (!string.IsNullOrWhiteSpace(seedToolName))
             plan.Add(seedToolName!);
+
+        // 프로젝트 전체 구조 분석 의도는 단일 도구 실행으로 고정한다.
+        if (string.Equals(seedToolName, "analyze_project_structure", StringComparison.OrdinalIgnoreCase))
+            return plan;
 
         if (!allowMultiToolPlan)
             return plan;
@@ -628,7 +653,12 @@ public sealed class RunOrchestrator
         AddIf("add_comments", "주석", "comment", "문서화");
         AddIf("refactor_current_code", "리팩터", "리팩토링", "refactor");
         AddIf("fix_code_issues", "버그", "오류", "고쳐", "fix");
-        AddIf("summarize_current_code", "요약", "설명", "정리해줘");
+
+        // 현재 코드가 있을 때만 코드 요약 도구를 추가한다.
+        // "프로젝트" 키워드가 있으면 프로젝트 요약 의도로 간주해 현재 코드 요약은 붙이지 않는다.
+        var isProjectScope = msg.Contains("프로젝트", StringComparison.Ordinal);
+        if (hasCodeContext && !isProjectScope)
+            AddIf("summarize_current_code", "요약", "설명", "정리해줘", "현재 코드");
 
         return plan.Take(maxPlanSteps).ToList();
     }
@@ -646,6 +676,13 @@ public sealed class RunOrchestrator
             var tool = _registry.GetTool(toolName);
             if (tool is not null)
             {
+                // analyze_project_structure: 전체 프로젝트 구조 분석 전용 분기
+                if (string.Equals(toolName, "analyze_project_structure", StringComparison.OrdinalIgnoreCase))
+                {
+                    await GenerateProjectStructureProposalAsync(run, tool, ct);
+                    return;
+                }
+
                 if (IntentResolver.IsEditTool(toolName) && run.Files is { Count: > 0 })
                 {
                     await GeneratePerFileProposalAsync(run, toolName, tool, ct);
@@ -987,6 +1024,40 @@ public sealed class RunOrchestrator
             Summary = $"{toolName} 수정안 생성 ({fileChanges.Count}개 파일)",
             Changes = fileChanges,
             RequiresApproval = true
+        };
+    }
+
+    private async Task GenerateProjectStructureProposalAsync(RunData run, IMcpTool tool, CancellationToken ct)
+    {
+        _logger.LogInformation(
+            "Run {RunId} 프로젝트 전체 구조 분석 시작. 인덱스 준비={Ready}, 루트={Root}",
+            run.RunId, _cache.IsAvailable, _cache.CurrentIndexRoot ?? "(미설정)");
+
+        var arguments = new Dictionary<string, object?>
+        {
+            ["code"] = run.Code ?? "",
+            ["language"] = run.Language ?? "C#"
+        };
+
+        var toolResult = await tool.ExecuteAsync(arguments, ct);
+        var resultText = toolResult.Content.FirstOrDefault()?.Text ?? "(결과 없음)";
+        _runLogger.LogToolExecution(run.RunId, "analyze_project_structure", resultText);
+
+        // 저장 경로 안내 추가
+        var saveNote = string.Empty;
+        if (_cache.CurrentIndexRoot is not null)
+        {
+            var configuredOutput = _config.ProjectSummary.OutputPath;
+            var resolvedPath = Path.IsPathRooted(configuredOutput)
+                ? configuredOutput
+                : Path.GetFullPath(configuredOutput, _cache.CurrentIndexRoot);
+            saveNote = $"\n\n---\n> 요약 결과가 `{resolvedPath.Replace('\\', '/')}` 에 저장되었습니다.";
+        }
+
+        run.Proposal = new RunProposal
+        {
+            Summary = resultText + saveNote,
+            RequiresApproval = false
         };
     }
 

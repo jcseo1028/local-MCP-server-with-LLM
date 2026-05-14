@@ -86,3 +86,19 @@
 - 기본 경로는 `<solution-root>/.localmcp/rag-index.sqlite`이며, `Rag.DbPath`가 있으면 이를 우선한다.
 - `VectorSearchEngine`은 `IResourceCache`를 통해 embedding을 조회/저장해야 한다.
 - RAG context는 `RunOrchestrator`의 입력 크기를 줄이기 위한 보조 수단이며, 기존 메서드 보존·구문 검증 규칙을 대체하지 않는다.
+
+## 11. 프로젝트 전체 구조 요약 규칙 (v2.7)
+
+### 11.1 멀티파일 요약 대상
+- "프로젝트 전체 구조 요약", "아키텍처 분석", "전체 문서 작성" 등 의도 감지 시 analyze_project_structure 도구 동작 및 multiFileContextRequired=true 반환
+- IntentResolver는 임수식 내용이 있더라도 "전체", "구조", "수도", "모델", "정리가", "아키텍처", "마인드 매핑", "문서화" 등을 인식한다.
+
+### 11.2 멀티파일 chunk 수집
+- ResourceCache/VectorSearchEngine에서 전체 색인 파일을 순회하면서, 각 파일별 대표 chunk 추출
+- 크기 제한: Config.projectSummary.maxProjectFiles (단, 단일 파일 > 500줄 기준)
+- 파일당 최대 chunk: Config.projectSummary.maxProjectChunks (기본 3)
+
+### 11.3 프로젝트 요약 결과 저장
+- 프로젝트 전체 구조 요약 결과(LLM 응답)을 지정된 경로에 자동 저장
+- 기본 경로: `<solution-root>/docs/project-summary.md`이지만, docs 폴더가 없으면 `.project-summary/` 등 대체 경로 사용
+- 저장 경로 유무 부존 시 Config.projectSummary.backupOldSummary = true이면 기존 파일 백업, false이면 덮어쓰기

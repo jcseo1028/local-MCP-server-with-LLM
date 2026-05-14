@@ -1,5 +1,7 @@
+using LocalMcpServer.Configuration;
 using LocalMcpServer.LlmConnector;
 using LocalMcpServer.ResourceCache;
+using Microsoft.Extensions.Options;
 
 namespace LocalMcpServer.ToolRegistry;
 
@@ -13,15 +15,21 @@ public sealed class AnalyzeProjectStructureTool : IMcpTool
     private readonly OllamaConnector _llm;
     private readonly PromptTemplateLoader _promptLoader;
     private readonly IResourceCache _cache;
+    private readonly ProjectSummarySection _summaryConfig;
+    private readonly ILogger<AnalyzeProjectStructureTool> _logger;
 
     public AnalyzeProjectStructureTool(
         OllamaConnector llm,
         PromptTemplateLoader promptLoader,
-        IResourceCache cache)
+        IResourceCache cache,
+        IOptions<ServerConfig> config,
+        ILogger<AnalyzeProjectStructureTool> logger)
     {
         _llm = llm;
         _promptLoader = promptLoader;
         _cache = cache;
+        _summaryConfig = config.Value.ProjectSummary;
+        _logger = logger;
     }
 
     public string Name => "analyze_project_structure";
@@ -75,10 +83,53 @@ public sealed class AnalyzeProjectStructureTool : IMcpTool
             }
         }, ct);
 
+        var summaryText = llmResponse.Text;
+
+        // 결과 파일 저장
+        if (_summaryConfig.Enabled && !string.IsNullOrWhiteSpace(summaryText))
+        {
+            await SaveSummaryToFileAsync(summaryText, ct);
+        }
+
         return new ToolCallResult
         {
-            Content = [new ToolContent { Text = llmResponse.Text }]
+            Content = [new ToolContent { Text = summaryText }]
         };
+    }
+
+    private async Task SaveSummaryToFileAsync(string summaryText, CancellationToken ct)
+    {
+        try
+        {
+            var projectRoot = _cache.CurrentIndexRoot;
+            if (string.IsNullOrWhiteSpace(projectRoot))
+            {
+                _logger.LogWarning("프로젝트 루트 경로를 확인할 수 없어 요약 파일을 저장하지 않습니다.");
+                return;
+            }
+
+            var outputPath = Path.IsPathRooted(_summaryConfig.OutputPath)
+                ? _summaryConfig.OutputPath
+                : Path.GetFullPath(_summaryConfig.OutputPath, projectRoot);
+
+            var outputDir = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrWhiteSpace(outputDir))
+                Directory.CreateDirectory(outputDir);
+
+            if (_summaryConfig.BackupOld && File.Exists(outputPath))
+            {
+                var backupPath = outputPath + $".{DateTime.UtcNow:yyyyMMddHHmmss}.bak";
+                File.Move(outputPath, backupPath);
+                _logger.LogInformation("기존 요약 파일 백업: {BackupPath}", backupPath);
+            }
+
+            await File.WriteAllTextAsync(outputPath, summaryText, System.Text.Encoding.UTF8, ct);
+            _logger.LogInformation("프로젝트 요약 저장 완료: {OutputPath}", outputPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "프로젝트 요약 파일 저장 실패 (결과는 반환됩니다)");
+        }
     }
 
     private static string? GetStringArg(Dictionary<string, object?> args, string key)
